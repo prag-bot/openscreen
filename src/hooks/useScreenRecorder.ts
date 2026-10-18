@@ -3,9 +3,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useScopedT } from "@/contexts/I18nContext";
 import {
+	measureNativeMacWebcamOffsetSeconds,
 	type NativeMacRecordingRequest,
 	parseMacDisplayIdFromSourceId,
 	parseMacWindowIdFromSourceId,
+	requireNativeMacScreenStartTime,
 } from "@/lib/nativeMacRecording";
 import {
 	type NativeWindowsRecordingRequest,
@@ -69,6 +71,7 @@ type UseScreenRecorderReturn = {
 	systemAudioEnabled: boolean;
 	setSystemAudioEnabled: (enabled: boolean) => void;
 	webcamEnabled: boolean;
+	webcamPreviewStream: MediaStream | null;
 	setWebcamEnabled: (enabled: boolean) => Promise<boolean>;
 	cursorCaptureMode: CursorCaptureMode;
 	setCursorCaptureMode: (mode: CursorCaptureMode) => void;
@@ -85,6 +88,7 @@ type NativeMacRecordingHandle = {
 	recordingId: number;
 	finalizing: boolean;
 	paused: boolean;
+	webcamOffsetSeconds: number;
 };
 
 export function useScreenRecorder(): UseScreenRecorderReturn {
@@ -99,6 +103,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	const [webcamDeviceName, setWebcamDeviceName] = useState<string | undefined>(undefined);
 	const [systemAudioEnabled, setSystemAudioEnabled] = useState(false);
 	const [webcamEnabled, setWebcamEnabledState] = useState(false);
+	const [webcamPreviewStream, setWebcamPreviewStream] = useState<MediaStream | null>(null);
 	const [cursorCaptureMode, setCursorCaptureMode] = useState<CursorCaptureMode>("editable-overlay");
 	const screenRecorder = useRef<RecorderHandle | null>(null);
 	const webcamRecorder = useRef<RecorderHandle | null>(null);
@@ -187,6 +192,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	}, []);
 
 	const stopWebcamPreviewStream = useCallback(() => {
+		setWebcamPreviewStream(null);
 		if (!webcamStream.current) {
 			return;
 		}
@@ -258,6 +264,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				stream.getVideoTracks().forEach((track) => {
 					track.onended = () => {
 						webcamStream.current = null;
+						setWebcamPreviewStream(null);
 						if (!restarting.current) {
 							setWebcamEnabledState(false);
 							toast.error(t("recording.cameraDisconnected"));
@@ -265,6 +272,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 					};
 				});
 				webcamStream.current = stream;
+				setWebcamPreviewStream(stream);
 				webcamReady.current = true;
 			} catch (cameraError) {
 				if (!cancelled) {
@@ -295,6 +303,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 					track.stop();
 				});
 				webcamStream.current = null;
+				setWebcamPreviewStream(null);
 			}
 		};
 	}, [webcamEnabled, webcamDeviceId, t]);
@@ -544,7 +553,10 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 					if (!webcamBlob || webcamBlob.size === 0) {
 						return undefined;
 					}
-					const fixedWebcamBlob = await fixWebmDuration(webcamBlob, duration);
+					const fixedWebcamBlob = await fixWebmDuration(
+						webcamBlob,
+						Math.max(0, duration - activeNativeRecording.webcamOffsetSeconds * 1000),
+					);
 					return {
 						videoData: await fixedWebcamBlob.arrayBuffer(),
 						fileName: `${RECORDING_FILE_PREFIX}${activeNativeRecording.recordingId}${WEBCAM_FILE_SUFFIX}${VIDEO_FILE_EXTENSION}`,
@@ -583,6 +595,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 						screenVideoPath: result.path,
 						recordingId: activeNativeRecording.recordingId,
 						webcam: webcamAsset,
+						webcamOffsetSeconds: activeNativeRecording.webcamOffsetSeconds,
 						cursorCaptureMode,
 					});
 					if (attachResult.success) {
@@ -905,10 +918,8 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 
 			const availability = await window.electronAPI.isNativeMacCaptureAvailable();
 			if (!availability.success || !availability.available) {
-				if (availability.reason === "unsupported-platform") {
-					return false;
-				}
-
+				// On macOS the browser path cannot exclude this app's visible HUD.
+				// Never fall back to self-capturing video, including in system-cursor mode.
 				throw new Error(
 					availability.reason === "missing-helper"
 						? "Native macOS capture helper is not available."
@@ -1009,6 +1020,22 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				}
 				throw new Error(result.error ?? "Native macOS capture failed.");
 			}
+			let screenStartedAtUnixMs: number;
+			let webcamOffsetSeconds = 0;
+			try {
+				screenStartedAtUnixMs = requireNativeMacScreenStartTime(result);
+				if (nativeWebcamRecorder) {
+					webcamOffsetSeconds = measureNativeMacWebcamOffsetSeconds(
+						nativeWebcamRecorder.startedAtUnixMs,
+						screenStartedAtUnixMs,
+					);
+				}
+			} catch (error) {
+				if (nativeWebcamRecorder && nativeWebcamRecorder.recorder.state !== "inactive")
+					nativeWebcamRecorder.recorder.stop();
+				await window.electronAPI.stopNativeMacRecording(true);
+				throw error;
+			}
 			if (!isCountdownRunActive(countdownRunToken)) {
 				if (nativeWebcamRecorder && nativeWebcamRecorder.recorder.state !== "inactive") {
 					nativeWebcamRecorder.recorder.stop();
@@ -1022,10 +1049,11 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 				recordingId: result.recordingId,
 				finalizing: false,
 				paused: false,
+				webcamOffsetSeconds,
 			};
 			webcamRecorder.current = nativeWebcamRecorder;
 			accumulatedDurationMs.current = 0;
-			segmentStartedAt.current = Date.now();
+			segmentStartedAt.current = screenStartedAtUnixMs;
 			allowAutoFinalize.current = true;
 			setRecording(true);
 			setPaused(false);
@@ -1679,6 +1707,7 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		systemAudioEnabled,
 		setSystemAudioEnabled,
 		webcamEnabled,
+		webcamPreviewStream,
 		setWebcamEnabled,
 		cursorCaptureMode,
 		setCursorCaptureMode,

@@ -67,7 +67,10 @@ describe("projectPersistence media compatibility", () => {
 		expect(normalizeProjectEditor({ webcamMaskShape: "rounded" }).webcamMaskShape).toBe("rounded");
 		expect(
 			normalizeProjectEditor({ webcamMaskShape: "not-a-real-shape" as never }).webcamMaskShape,
-		).toBe("rectangle");
+		).toBe("circle");
+		expect(normalizeProjectEditor({ webcamMaskShape: "rectangle" }).webcamMaskShape).toBe(
+			"rectangle",
+		);
 	});
 
 	it("normalizes webcam mirroring safely", () => {

@@ -14,6 +14,12 @@ const assetBaseUrl = assetBaseUrlArg ? assetBaseUrlArg.slice(ASSET_BASE_URL_ARG_
 
 contextBridge.exposeInMainWorld("electronAPI", {
 	assetBaseUrl,
+	getAutoEditStatus: () => ipcRenderer.invoke("auto-edit-status"),
+	prepareAutoEditAudio: (request: { jobId: string; videoPath: string }) =>
+		ipcRenderer.invoke("prepare-auto-edit-audio", request),
+	planAutoEdit: (request: import("../src/lib/autoEdit").AutoEditRequest) =>
+		ipcRenderer.invoke("plan-auto-edit", request),
+	cancelAutoEdit: (jobId: string) => ipcRenderer.invoke("cancel-auto-edit", jobId),
 	invokeNativeBridge: <TData>(request: NativeBridgeRequest) => {
 		return ipcRenderer.invoke(NATIVE_BRIDGE_CHANNEL, request) as Promise<TData>;
 	},
@@ -122,6 +128,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
 		screenVideoPath: string;
 		recordingId: number;
 		webcam: { fileName: string; videoData: ArrayBuffer };
+		webcamOffsetSeconds: number;
 		cursorCaptureMode?: import("../src/lib/recordingSession").CursorCaptureMode;
 	}) => {
 		return ipcRenderer.invoke("attach-native-mac-webcam-recording", payload);
@@ -145,6 +152,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
 	},
 	writeExportToPath: (videoData: ArrayBuffer, filePath: string) => {
 		return ipcRenderer.invoke("write-export-to-path", videoData, filePath);
+	},
+	exportHyperframesProject: (
+		request: import("../src/lib/exporter/hyperframesExporter").HyperframesExportRequest,
+	) => {
+		return ipcRenderer.invoke("export-hyperframes-project", request);
 	},
 	openVideoFilePicker: () => {
 		return ipcRenderer.invoke("open-video-file-picker");

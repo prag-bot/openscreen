@@ -1,5 +1,30 @@
 import { describe, expect, it } from "vitest";
-import { parseMacDisplayIdFromSourceId, parseMacWindowIdFromSourceId } from "./nativeMacRecording";
+import {
+	measureNativeMacWebcamOffsetSeconds,
+	parseMacDisplayIdFromSourceId,
+	parseMacWindowIdFromSourceId,
+	requireNativeMacScreenStartTime,
+} from "./nativeMacRecording";
+
+describe("native camera/screen start clocks", () => {
+	it("measures signed lead-in and late-start offsets without IPC receipt time", () => {
+		expect(measureNativeMacWebcamOffsetSeconds(10_000, 11_250)).toBe(-1.25);
+		expect(measureNativeMacWebcamOffsetSeconds(11_250, 10_000)).toBe(1.25);
+		expect(measureNativeMacWebcamOffsetSeconds(10_000, 10_000)).toBe(0);
+	});
+	it.each([
+		undefined,
+		NaN,
+		Infinity,
+		-1,
+		0,
+		"10000",
+	])("rejects a missing/invalid helper clock (%s)", (value) => {
+		expect(() => requireNativeMacScreenStartTime({ screenStartedAtUnixMs: value })).toThrow(
+			/first-frame clock/,
+		);
+	});
+});
 
 describe("nativeMacRecording source parsing", () => {
 	it("parses Electron window source ids into ScreenCaptureKit window ids", () => {

@@ -44,6 +44,15 @@ describe("createRecorderHandle", () => {
 		vi.unstubAllGlobals();
 		window.electronAPI = undefined as unknown as ElectronAPI;
 	});
+	it("exposes the wall clock at start, before any delayed recorder output", () => {
+		stubElectronAPI({});
+		const now = vi.spyOn(Date, "now").mockReturnValue(12345);
+		const handle = createRecorderHandle({} as MediaStream, {});
+		now.mockReturnValue(13000);
+		expect(handle.startedAtUnixMs).toBe(12345);
+		driver(handle).stop();
+		now.mockRestore();
+	});
 
 	it("streams chunks to disk in arrival order and resolves an empty blob", async () => {
 		const appended: string[] = [];

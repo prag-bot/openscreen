@@ -48,6 +48,13 @@ export type NativeMacRecordingRequest = {
 	};
 };
 
+/** Added only by the main process, never trusted from renderer IPC data. */
+export type NativeMacHelperRecordingRequest = NativeMacRecordingRequest & {
+	captureExclusion: {
+		processId: number;
+	};
+};
+
 export type NativeMacHelperReadyEvent = {
 	event: "ready";
 	schemaVersion: 1;
@@ -56,6 +63,9 @@ export type NativeMacHelperReadyEvent = {
 export type NativeMacHelperRecordingStartedEvent = {
 	event: "recording-started";
 	timestampMs: number;
+	/** Wall clock of the source frame used as the file's zero, derived from host-clock PTS. */
+	screenStartedAtUnixMs: number;
+	excludedRecorderProcessId: number;
 };
 
 export type NativeMacHelperRecordingStoppedEvent = {
@@ -87,8 +97,41 @@ export type NativeMacRecordingStartResult = {
 	recordingId?: number;
 	path?: string;
 	helperPath?: string;
+	screenStartedAtUnixMs?: number;
 	error?: string;
 };
+
+/** Fail closed with old helpers: IPC delivery time is not a recording clock. */
+export function requireNativeMacScreenStartTime(event: {
+	screenStartedAtUnixMs?: unknown;
+}): number {
+	const value = event.screenStartedAtUnixMs;
+	if (
+		typeof value !== "number" ||
+		!Number.isFinite(value) ||
+		value <= 0 ||
+		value > Number.MAX_SAFE_INTEGER
+	) {
+		throw new Error(
+			"Native macOS capture helper did not report a valid first-frame clock. Rebuild or update the capture helper.",
+		);
+	}
+	return value;
+}
+
+export function measureNativeMacWebcamOffsetSeconds(
+	cameraStartedAtUnixMs: number,
+	screenStartedAtUnixMs: number,
+): number {
+	if (!Number.isFinite(cameraStartedAtUnixMs) || cameraStartedAtUnixMs <= 0) {
+		throw new Error("Webcam recorder did not report a valid start clock.");
+	}
+	const offset =
+		(cameraStartedAtUnixMs - requireNativeMacScreenStartTime({ screenStartedAtUnixMs })) / 1000;
+	if (Math.abs(offset) > 86400)
+		throw new Error("Webcam start clock is outside the recording range.");
+	return offset;
+}
 
 export function parseMacWindowIdFromSourceId(sourceId?: string | null) {
 	if (!sourceId?.startsWith("window:")) {

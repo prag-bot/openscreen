@@ -1,0 +1,17 @@
+{
+  "extends": "./electron-builder.json5",
+  "appId": "com.local.openscreen.loom",
+  "productName": "Openscreen Loom",
+  "extraMetadata": {
+    "name": "openscreen-loom",
+    "productName": "Openscreen Loom"
+  },
+  "npmRebuild": false,
+  "directories": {
+    "output": "release/loom"
+  },
+  "mac": {
+    "identity": null,
+    "target": [{ "target": "dir", "arch": ["arm64"] }]
+  }
+}

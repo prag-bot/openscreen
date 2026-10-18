@@ -62,6 +62,10 @@ struct RecordingRequest: Decodable {
 		let manifestPath: String?
 	}
 
+	struct CaptureExclusion: Decodable {
+		let processId: Int32
+	}
+
 	let schemaVersion: Int?
 	let recordingId: Int?
 	let source: Source
@@ -70,6 +74,7 @@ struct RecordingRequest: Decodable {
 	let webcam: Webcam
 	let cursor: Cursor
 	let outputs: Outputs
+	let captureExclusion: CaptureExclusion
 }
 
 enum HelperError: Error, CustomStringConvertible {
@@ -80,6 +85,7 @@ enum HelperError: Error, CustomStringConvertible {
 	case invalidSourceType(String)
 	case permissionDenied(String)
 	case writerSetupFailed(String)
+	case captureIsolationFailed(String)
 
 	var description: String {
 		switch self {
@@ -96,6 +102,8 @@ enum HelperError: Error, CustomStringConvertible {
 		case .permissionDenied(let message):
 			return message
 		case .writerSetupFailed(let message):
+			return message
+		case .captureIsolationFailed(let message):
 			return message
 		}
 	}
@@ -136,6 +144,7 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 	private var microphoneAudioInput: AVAssetWriterInput?
 	private var didStartWriting = false
 	private var didEmitRecordingStarted = false
+	private var screenStartedAtUnixMs: Double?
 	private var isStopping = false
 	private var isPaused = false
 	private var pauseStartedAt: CMTime?
@@ -267,6 +276,9 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		if pauseState.paused {
 			return
 		}
+		// ScreenCaptureKit timestamps use the host clock. Preserve the unretimed
+		// PTS so pause compaction cannot alter the wall clock of the file's zero.
+		let rawPresentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 		guard let sampleBuffer = retimedSampleBuffer(sampleBuffer, subtracting: pauseState.offset) else {
 			return
 		}
@@ -292,19 +304,29 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		}
 		let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 		if !didStartWriting {
+			let hostNow = CMClockGetTime(hostClock)
+			let frameAgeSeconds = CMTimeGetSeconds(CMTimeSubtract(hostNow, rawPresentationTime))
+			guard rawPresentationTime.isValid, rawPresentationTime.isNumeric,
+				hostNow.isValid, hostNow.isNumeric, frameAgeSeconds.isFinite else {
+				emitError(code: "invalid-screen-clock", message: "ScreenCaptureKit did not provide a valid first-frame host clock.")
+				return
+			}
+			screenStartedAtUnixMs = (Date().timeIntervalSince1970 - frameAgeSeconds) * 1000
 			writer.startWriting()
 			writer.startSession(atSourceTime: presentationTime)
 			didStartWriting = true
 		}
 
 		if videoInput.isReadyForMoreMediaData {
-			if videoInput.append(sampleBuffer), !didEmitRecordingStarted {
+			if videoInput.append(sampleBuffer), !didEmitRecordingStarted, let screenStartedAtUnixMs {
 				didEmitRecordingStarted = true
 				emit([
 					"event": "recording-started",
 					"timestampMs": Int(Date().timeIntervalSince1970 * 1000),
+					"screenStartedAtUnixMs": screenStartedAtUnixMs,
 					"width": outputWidth,
 					"height": outputHeight,
+					"excludedRecorderProcessId": request.captureExclusion.processId,
 				])
 			}
 		}
@@ -338,6 +360,9 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 	}
 
 	private func makeCaptureTarget(from content: SCShareableContent) throws -> CaptureTarget {
+		guard request.captureExclusion.processId > 0 else {
+			throw HelperError.captureIsolationFailed("Recorder process identity is required for isolated capture.")
+		}
 		switch request.source.type {
 		case "display":
 			guard let displayId = request.source.displayId else {
@@ -346,10 +371,21 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 			guard let display = content.displays.first(where: { $0.displayID == displayId }) else {
 				throw HelperError.sourceNotFound("No ScreenCaptureKit display found for id \(displayId).")
 			}
+			guard let recorderApplication = content.applications.first(where: {
+				$0.processID == request.captureExclusion.processId
+			}) else {
+				throw HelperError.captureIsolationFailed("Cannot identify the recorder application to exclude its HUD windows.")
+			}
 			let width = Int(CGDisplayPixelsWide(display.displayID))
 			let height = Int(CGDisplayPixelsHigh(display.displayID))
 			return CaptureTarget(
-				filter: SCContentFilter(display: display, excludingWindows: []),
+				// Exclude the application rather than a snapshot of its windows. The HUD
+				// stays visible to the user, including camera preview and new popovers.
+				filter: SCContentFilter(
+					display: display,
+					excludingApplications: [recorderApplication],
+					exceptingWindows: []
+				),
 				width: clampCaptureDimension(width, fallback: request.video.width),
 				height: clampCaptureDimension(height, fallback: request.video.height)
 			)
@@ -359,6 +395,9 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 			}
 			guard let window = content.windows.first(where: { $0.windowID == windowId }) else {
 				throw HelperError.sourceNotFound("No ScreenCaptureKit window found for id \(windowId).")
+			}
+			if window.owningApplication?.processID == request.captureExclusion.processId {
+				throw HelperError.captureIsolationFailed("Recorder-owned windows cannot be recorded.")
 			}
 			let candidateDisplay = content.displays.first {
 				$0.frame.intersects(window.frame) || $0.frame.contains(CGPoint(x: window.frame.midX, y: window.frame.midY))

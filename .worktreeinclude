@@ -1,0 +1,2 @@
+# Codex: copy ignored environment files into managed worktrees.
+.env*

@@ -1,16 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-	app,
-	BrowserWindow,
-	ipcMain,
-	Menu,
-	nativeImage,
-	session,
-	systemPreferences,
-	Tray,
-} from "electron";
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, session, Tray } from "electron";
 import { ShortcutBinding } from "../src/lib/shortcuts";
 import {
 	loadAndRegisterGlobalShortcut,
@@ -19,6 +10,7 @@ import {
 } from "./globalShortcut";
 import { mainT, setMainLocale } from "./i18n";
 import { getSelectedDesktopSource, registerIpcHandlers } from "./ipc/handlers";
+import { configureSingleInstanceLifecycle } from "./startupLifecycle";
 import {
 	createCountdownOverlayWindow,
 	createEditorWindow,
@@ -91,11 +83,19 @@ const trayIconSize = isMac ? 16 : 24;
 const defaultTrayIcon = getTrayIcon("openscreen.png", trayIconSize);
 const recordingTrayIcon = getTrayIcon("rec-button.png", trayIconSize);
 
+let startupReady = false;
+const ownsAppInstance = configureSingleInstanceLifecycle(app, showMainWindow, () => startupReady);
+
 function createWindow() {
-	mainWindow = createHudOverlayWindow();
+	if (!mainWindow || mainWindow.isDestroyed()) {
+		mainWindow = createHudOverlayWindow();
+	}
 }
 
 function showMainWindow() {
+	// Tray and shortcut callbacks must obey the same barrier as Dock activation.
+	if (!startupReady) return;
+
 	if (mainWindow && !mainWindow.isDestroyed()) {
 		if (mainWindow.isMinimized()) {
 			mainWindow.restore();
@@ -365,13 +365,15 @@ function forceCloseEditorWindow(windowToClose: BrowserWindow | null) {
 }
 
 function createEditorWindowWrapper() {
-	if (mainWindow) {
-		isForceClosing = true;
-		mainWindow.close();
-		isForceClosing = false;
-		mainWindow = null;
-	}
+	// Keep a replacement alive before closing the HUD, so window-all-closed
+	// cannot quit the app during the recording-to-editor handoff.
+	const previousWindow = mainWindow;
 	mainWindow = createEditorWindow();
+	if (previousWindow && !previousWindow.isDestroyed()) {
+		isForceClosing = true;
+		previousWindow.close();
+		isForceClosing = false;
+	}
 	editorHasUnsavedChanges = false;
 
 	mainWindow.on("close", (event) => {
@@ -433,27 +435,12 @@ app.on("window-all-closed", () => {
 	app.quit();
 });
 
-app.on("activate", () => {
-	// On macOS, re-open a window when the dock icon is clicked and none are open.
-	const hasVisibleWindow = BrowserWindow.getAllWindows().some((window) => {
-		if (window.isDestroyed() || !window.isVisible()) {
-			return false;
-		}
-
-		const url = window.webContents.getURL();
-		const isCountdownOverlayWindow = url.includes("windowType=countdown-overlay");
-		return !isCountdownOverlayWindow;
-	});
-	if (!hasVisibleWindow) {
-		showMainWindow();
-	}
-});
-
 app.on("will-quit", () => {
 	unregisterAllGlobalShortcuts();
 });
 
 app.whenReady().then(async () => {
+	if (!ownsAppInstance) return;
 	// Force "regular" activation policy so the Dock icon appears. The HUD overlay
 	// (transparent, frameless, skipTaskbar) is the first window, and AppKit would
 	// otherwise classify us as an accessory app.
@@ -503,14 +490,8 @@ app.whenReady().then(async () => {
 		{ useSystemPicker: false },
 	);
 
-	// Request mic permission now. Screen Recording is requested lazily from the
-	// source-picker action so its prompt isn't hidden behind the selector window.
-	if (process.platform === "darwin") {
-		const micStatus = systemPreferences.getMediaAccessStatus("microphone");
-		if (micStatus !== "granted") {
-			await systemPreferences.askForMediaAccess("microphone");
-		}
-	}
+	// Media access is requested by explicit microphone/camera/record actions,
+	// never during startup before the recorder's IPC handlers are registered.
 
 	ipcMain.on("hud-overlay-close", () => {
 		app.quit();
@@ -532,11 +513,12 @@ app.whenReady().then(async () => {
 	await ensureRecordingsDir();
 
 	function switchToHudWrapper() {
-		if (mainWindow) {
+		const previousWindow = mainWindow;
+		mainWindow = createHudOverlayWindow();
+		if (previousWindow && previousWindow !== mainWindow && !previousWindow.isDestroyed()) {
 			isForceClosing = true;
-			mainWindow.close();
+			previousWindow.close();
 			isForceClosing = false;
-			mainWindow = null;
 		}
 		showMainWindow();
 	}
@@ -561,5 +543,6 @@ app.whenReady().then(async () => {
 
 	await loadAndRegisterGlobalShortcut(showMainWindow);
 
+	startupReady = true;
 	createWindow();
 });

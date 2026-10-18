@@ -1,5 +1,5 @@
 import type { Span } from "dnd-timeline";
-import { FolderOpen, Languages, Save, Video } from "lucide-react";
+import { FolderOpen, Languages, Save, Sparkles, Video } from "lucide-react";
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { toast } from "sonner";
@@ -25,6 +25,8 @@ import { useShortcuts } from "@/contexts/ShortcutsContext";
 import { INITIAL_EDITOR_STATE, useEditorHistory } from "@/hooks/useEditorHistory";
 import { type Locale } from "@/i18n/config";
 import { getAvailableLocales, getLocaleName } from "@/i18n/loader";
+import { buildAutoEditTrims } from "@/lib/applyAutoEdit";
+import type { AutoEditPlan } from "@/lib/autoEdit";
 import {
 	captionSegmentsToAnnotationRegions,
 	extractMono16kFromVideoUrl,
@@ -49,8 +51,10 @@ import {
 	type GifSizePreset,
 	VideoExporter,
 } from "@/lib/exporter";
+import type { HyperframesExportRequest } from "@/lib/exporter/hyperframesExporter";
 import { computeFrameStepTime } from "@/lib/frameStep";
 import type { CursorCaptureMode, ProjectMedia } from "@/lib/recordingSession";
+import { normalizeWebcamOffsetSeconds } from "@/lib/recordingSession";
 import { matchesShortcut } from "@/lib/shortcuts";
 import {
 	getExportFolder,
@@ -67,6 +71,7 @@ import {
 	getNativeAspectRatioValue,
 	isPortraitAspectRatio,
 } from "@/utils/aspectRatioUtils";
+import { AutoEditDialog } from "./AutoEditDialog";
 import { EditorEmptyState } from "./EditorEmptyState";
 import { ExportDialog } from "./ExportDialog";
 import {
@@ -75,6 +80,7 @@ import {
 	DEFAULT_GIF_SETTINGS,
 	DEFAULT_SOURCE_DIMENSIONS,
 } from "./editorDefaults";
+import { HyperframesExportButton } from "./HyperframesExportButton";
 import PlaybackControls from "./PlaybackControls";
 import {
 	createProjectData,
@@ -113,6 +119,7 @@ import {
 	type ZoomRegion,
 } from "./types";
 import { UnsavedChangesDialog } from "./UnsavedChangesDialog";
+import { useWebcamMedia } from "./useWebcamMedia";
 import VideoPlayback, { VideoPlaybackRef } from "./VideoPlayback";
 
 /** Single Sonner slot so auto-caption phases update in place instead of stacking. */
@@ -214,8 +221,8 @@ export default function VideoEditor() {
 	// Non-undoable state
 	const [videoPath, setVideoPath] = useState<string | null>(null);
 	const [videoSourcePath, setVideoSourcePath] = useState<string | null>(null);
-	const [webcamVideoPath, setWebcamVideoPath] = useState<string | null>(null);
-	const [webcamVideoSourcePath, setWebcamVideoSourcePath] = useState<string | null>(null);
+	const { webcamVideoPath, webcamVideoSourcePath, webcamOffsetSeconds, setWebcamMedia } =
+		useWebcamMedia();
 	const [currentProjectPath, setCurrentProjectPath] = useState<string | null>(null);
 	const [loading, setLoading] = useState(true);
 	const [error, setError] = useState<string | null>(null);
@@ -236,6 +243,7 @@ export default function VideoEditor() {
 	const [exportProgress, setExportProgress] = useState<ExportProgress | null>(null);
 	const [exportError, setExportError] = useState<string | null>(null);
 	const [showExportDialog, setShowExportDialog] = useState(false);
+	const [showAutoEditDialog, setShowAutoEditDialog] = useState(false);
 	const [showNewRecordingDialog, setShowNewRecordingDialog] = useState(false);
 	const [exportQuality, setExportQuality] = useState<ExportQuality>(
 		DEFAULT_EXPORT_SETTINGS.quality,
@@ -343,7 +351,7 @@ export default function VideoEditor() {
 			webcamVideoSourcePath ?? (webcamVideoPath ? fromFileUrl(webcamVideoPath) : null);
 		return {
 			screenVideoPath,
-			...(webcamSourcePath ? { webcamVideoPath: webcamSourcePath } : {}),
+			...(webcamSourcePath ? { webcamVideoPath: webcamSourcePath, webcamOffsetSeconds } : {}),
 			...(recordingCursorCaptureMode ? { cursorCaptureMode: recordingCursorCaptureMode } : {}),
 		};
 	}, [
@@ -351,6 +359,7 @@ export default function VideoEditor() {
 		videoSourcePath,
 		webcamVideoPath,
 		webcamVideoSourcePath,
+		webcamOffsetSeconds,
 		recordingCursorCaptureMode,
 	]);
 
@@ -367,6 +376,9 @@ export default function VideoEditor() {
 			}
 			const sourcePath = projectMedia.screenVideoPath;
 			const webcamSourcePath = projectMedia.webcamVideoPath ?? null;
+			const projectWebcamOffset = webcamSourcePath
+				? normalizeWebcamOffsetSeconds(projectMedia.webcamOffsetSeconds)
+				: 0;
 			const projectCursorCaptureMode = projectMedia.cursorCaptureMode ?? null;
 			const normalizedEditor = normalizeProjectEditor(project.editor);
 			const inferredDurationMs = Math.max(
@@ -389,8 +401,7 @@ export default function VideoEditor() {
 			setError(null);
 			setVideoSourcePath(sourcePath);
 			setVideoPath(toFileUrl(sourcePath));
-			setWebcamVideoSourcePath(webcamSourcePath);
-			setWebcamVideoPath(webcamSourcePath ? toFileUrl(webcamSourcePath) : null);
+			setWebcamMedia(webcamSourcePath, projectWebcamOffset);
 			setRecordingCursorCaptureMode(projectCursorCaptureMode);
 			setCurrentProjectPath(path ?? null);
 
@@ -460,7 +471,9 @@ export default function VideoEditor() {
 				createProjectSnapshot(
 					{
 						screenVideoPath: sourcePath,
-						...(webcamSourcePath ? { webcamVideoPath: webcamSourcePath } : {}),
+						...(webcamSourcePath
+							? { webcamVideoPath: webcamSourcePath, webcamOffsetSeconds: projectWebcamOffset }
+							: {}),
 						...(projectCursorCaptureMode ? { cursorCaptureMode: projectCursorCaptureMode } : {}),
 					},
 					normalizedEditor,
@@ -468,7 +481,7 @@ export default function VideoEditor() {
 			);
 			return true;
 		},
-		[pushState],
+		[pushState, setWebcamMedia],
 	);
 
 	const currentProjectSnapshot = useMemo(() => {
@@ -560,15 +573,19 @@ export default function VideoEditor() {
 						: null;
 					setVideoSourcePath(sourcePath);
 					setVideoPath(toFileUrl(sourcePath));
-					setWebcamVideoSourcePath(webcamSourcePath);
-					setWebcamVideoPath(webcamSourcePath ? toFileUrl(webcamSourcePath) : null);
+					const sessionWebcamOffset = webcamSourcePath
+						? normalizeWebcamOffsetSeconds(session.webcamOffsetSeconds)
+						: 0;
+					setWebcamMedia(webcamSourcePath, sessionWebcamOffset);
 					setRecordingCursorCaptureMode(session.cursorCaptureMode ?? null);
 					setCurrentProjectPath(null);
 					setLastSavedSnapshot(
 						createProjectSnapshot(
 							{
 								screenVideoPath: sourcePath,
-								...(webcamSourcePath ? { webcamVideoPath: webcamSourcePath } : {}),
+								...(webcamSourcePath
+									? { webcamVideoPath: webcamSourcePath, webcamOffsetSeconds: sessionWebcamOffset }
+									: {}),
 								...(session.cursorCaptureMode
 									? { cursorCaptureMode: session.cursorCaptureMode }
 									: {}),
@@ -583,6 +600,7 @@ export default function VideoEditor() {
 				if (result.success && result.path) {
 					setVideoSourcePath(result.path);
 					setVideoPath(toFileUrl(result.path));
+					setWebcamMedia(null);
 					setRecordingCursorCaptureMode(null);
 					setCurrentProjectPath(null);
 					setLastSavedSnapshot(
@@ -599,7 +617,7 @@ export default function VideoEditor() {
 		}
 
 		loadInitialData();
-	}, [applyLoadedProject]);
+	}, [applyLoadedProject, setWebcamMedia]);
 
 	// Avoid overwriting saved prefs with defaults before they've loaded.
 	const [prefsHydrated, setPrefsHydrated] = useState(false);
@@ -838,8 +856,7 @@ export default function VideoEditor() {
 		await nativeBridgeClient.project.clearCurrentVideoPath();
 		setVideoPath(null);
 		setVideoSourcePath(null);
-		setWebcamVideoPath(null);
-		setWebcamVideoSourcePath(null);
+		setWebcamMedia(null);
 		setCurrentProjectPath(null);
 		setLastSavedSnapshot(null);
 		// Reset undoable editor state + undo/redo history to a clean slate.
@@ -867,7 +884,7 @@ export default function VideoEditor() {
 		nextSpeedIdRef.current = 1;
 		nextAnnotationIdRef.current = 1;
 		nextAnnotationZIndexRef.current = 1;
-	}, [resetState]);
+	}, [resetState, setWebcamMedia]);
 
 	const handleNewProject = useCallback(async () => {
 		if (hasUnsavedChanges) {
@@ -1884,6 +1901,7 @@ export default function VideoEditor() {
 					const gifExporter = new GifExporter({
 						videoUrl: videoPath,
 						webcamVideoUrl: webcamVideoPath || undefined,
+						webcamOffsetSeconds,
 						width: settings.gifConfig.width,
 						height: settings.gifConfig.height,
 						frameRate: settings.gifConfig.frameRate,
@@ -1979,6 +1997,7 @@ export default function VideoEditor() {
 					const exporter = new VideoExporter({
 						videoUrl: videoPath,
 						webcamVideoUrl: webcamVideoPath || undefined,
+						webcamOffsetSeconds,
 						width: exportWidth,
 						height: exportHeight,
 						frameRate: 60,
@@ -2092,6 +2111,7 @@ export default function VideoEditor() {
 			videoPath,
 			videoSourcePath,
 			webcamVideoPath,
+			webcamOffsetSeconds,
 			wallpaper,
 			zoomRegions,
 			trimRegions,
@@ -2125,6 +2145,81 @@ export default function VideoEditor() {
 			cursorTheme,
 			t,
 		],
+	);
+
+	const getHyperframesExportRequest = useCallback((): HyperframesExportRequest => {
+		const video = videoPlaybackRef.current?.video;
+		const screenVideoPath = videoSourcePath ?? (videoPath ? fromFileUrl(videoPath) : null);
+		if (!video || !screenVideoPath || !video.videoWidth || !video.videoHeight) {
+			throw new Error("Load a recording and wait for its metadata before exporting");
+		}
+		const canvas = calculateMp4ExportSettings({
+			quality: "source",
+			sourceWidth: video.videoWidth,
+			sourceHeight: video.videoHeight,
+			aspectRatioValue:
+				aspectRatio === "native"
+					? video.videoWidth / video.videoHeight
+					: getAspectRatioValue(aspectRatio),
+		});
+		const cameraPath =
+			webcamVideoSourcePath ?? (webcamVideoPath ? fromFileUrl(webcamVideoPath) : null);
+		return {
+			screenVideoPath,
+			...(cameraPath ? { webcamVideoPath: cameraPath } : {}),
+			webcamOffsetSeconds,
+			durationSeconds: duration,
+			width: canvas.width,
+			height: canvas.height,
+			trimRegions,
+			webcamLayoutPreset,
+			webcamSizePreset,
+			webcamPosition,
+			webcamMaskShape,
+			webcamMirrored,
+		};
+	}, [
+		videoSourcePath,
+		videoPath,
+		webcamVideoSourcePath,
+		webcamVideoPath,
+		webcamOffsetSeconds,
+		aspectRatio,
+		duration,
+		trimRegions,
+		webcamLayoutPreset,
+		webcamSizePreset,
+		webcamPosition,
+		webcamMaskShape,
+		webcamMirrored,
+	]);
+
+	const handleApplyAutoEdit = useCallback(
+		async (plan: AutoEditPlan, exportHyperframes: boolean) => {
+			const next = buildAutoEditTrims(plan, duration, trimRegions, nextTrimIdRef.current);
+			// Snapshot export metadata before the history update; override with these exact cuts.
+			const request = exportHyperframes
+				? { ...getHyperframesExportRequest(), trimRegions: next.trims }
+				: null;
+			nextTrimIdRef.current = next.nextId;
+			pushState({ trimRegions: next.trims });
+			toast.success("Auto edits applied", {
+				description: "Undo restores the previous timeline. Original footage is unchanged.",
+			});
+			if (request) {
+				const result = await window.electronAPI.exportHyperframesProject(request);
+				if (!result.success) {
+					if (result.canceled) {
+						toast.info("Cuts applied; HyperFrames export canceled.");
+						return;
+					}
+					throw new Error("Cuts were applied, but HyperFrames export failed: " + result.error);
+				}
+				toast.success("Edited HyperFrames project created", { description: result.path });
+				await window.electronAPI.revealInFolder(result.path);
+			}
+		},
+		[duration, trimRegions, pushState, getHyperframesExportRequest],
 	);
 
 	const handleOpenExportDialog = useCallback(() => {
@@ -2482,6 +2577,21 @@ export default function VideoEditor() {
 				</DialogContent>
 			</Dialog>
 
+			<AutoEditDialog
+				open={showAutoEditDialog}
+				onOpenChange={setShowAutoEditDialog}
+				videoPath={videoPath}
+				durationSeconds={duration}
+				trimRegions={trimRegions}
+				revision={JSON.stringify([
+					videoPath,
+					webcamVideoPath,
+					currentProjectPath,
+					duration,
+					trimRegions,
+				])}
+				onApply={handleApplyAutoEdit}
+			/>
 			<div
 				className="h-11 flex-shrink-0 bg-[#070809]/85 backdrop-blur-xl border-b border-white/[0.07] flex items-center justify-between px-5 z-50 shadow-[0_1px_0_rgba(255,255,255,0.03)]"
 				style={{ WebkitAppRegion: "drag" } as CSSProperties}
@@ -2531,6 +2641,15 @@ export default function VideoEditor() {
 						<Save size={14} />
 						{ts("project.save")}
 					</button>
+					<button
+						type="button"
+						onClick={() => setShowAutoEditDialog(true)}
+						disabled={!videoPath || isExporting || isAutoCaptioning}
+						className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[#34B27B] hover:bg-[#34B27B]/10 disabled:opacity-40 transition-colors text-[11px] font-medium"
+					>
+						<Sparkles size={14} />
+						Auto edit
+					</button>
 				</div>
 			</div>
 
@@ -2541,8 +2660,7 @@ export default function VideoEditor() {
 						onVideoImported={(path) => {
 							setVideoPath(toFileUrl(path));
 							setVideoSourcePath(path);
-							setWebcamVideoPath(null);
-							setWebcamVideoSourcePath(null);
+							setWebcamMedia(null);
 						}}
 						onProjectOpened={async (project, path) => {
 							const restored = await applyLoadedProject(project, path);
@@ -2592,6 +2710,7 @@ export default function VideoEditor() {
 													ref={videoPlaybackRef}
 													videoPath={videoPath || ""}
 													webcamVideoPath={webcamVideoPath || undefined}
+													webcamOffsetSeconds={webcamOffsetSeconds}
 													webcamLayoutPreset={webcamLayoutPreset}
 													webcamMaskShape={webcamMaskShape}
 													webcamMirrored={webcamMirrored}
@@ -2789,6 +2908,23 @@ export default function VideoEditor() {
 												: getAspectRatioValue(aspectRatio),
 										)}
 										onExport={handleOpenExportDialog}
+										hyperframesExportControl={
+											<>
+												<Button
+													variant="outline"
+													disabled={isExporting || isAutoCaptioning || duration <= 0}
+													onClick={() => setShowAutoEditDialog(true)}
+													className="mt-3 w-full border-white/10 text-slate-200"
+												>
+													<Sparkles className="mr-2 h-4 w-4 text-[#34B27B]" />
+													Auto edit with Codex
+												</Button>
+												<HyperframesExportButton
+													getRequest={getHyperframesExportRequest}
+													disabled={isExporting || duration <= 0}
+												/>
+											</>
+										}
 										onExportPanelOpen={() => {
 											setSelectedZoomId(null);
 											setSelectedTrimId(null);

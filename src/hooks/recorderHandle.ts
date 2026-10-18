@@ -2,6 +2,8 @@ const RECORDER_TIMESLICE_MS = 1000;
 
 export type RecorderHandle = {
 	recorder: MediaRecorder;
+	/** Wall clock at MediaRecorder.start(), not the delayed first chunk/IPC acknowledgement. */
+	startedAtUnixMs: number;
 	/**
 	 * Resolves once the recording drains. Empty blob when streamed (bytes already on
 	 * disk), full WebM when in-memory. Rejects on a mid-stream write failure so a
@@ -138,9 +140,11 @@ export function createRecorderHandle(
 		}
 	}
 
+	const startedAtUnixMs = Date.now();
 	recorder.start(RECORDER_TIMESLICE_MS);
 	return {
 		recorder,
+		startedAtUnixMs,
 		recordedBlobPromise,
 		isStreaming: () => mode === "streaming" && !appendError,
 		discard,

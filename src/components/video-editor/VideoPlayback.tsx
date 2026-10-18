@@ -41,6 +41,7 @@ import {
 } from "@/lib/cursor/nativeCursor";
 import { classifyWallpaper, DEFAULT_WALLPAPER, resolveImageWallpaperUrl } from "@/lib/wallpaper";
 import { getCssClipPath } from "@/lib/webcamMaskShapes";
+import { webcamSourceTimeSeconds } from "@/lib/webcamTimeline";
 import type { CursorRecordingData } from "@/native/contracts";
 import {
 	type AspectRatio,
@@ -93,6 +94,7 @@ import {
 interface VideoPlaybackProps {
 	videoPath: string;
 	webcamVideoPath?: string;
+	webcamOffsetSeconds?: number;
 	webcamLayoutPreset: WebcamLayoutPreset;
 	webcamMaskShape?: import("./types").WebcamMaskShape;
 	webcamMirrored?: boolean;
@@ -220,6 +222,7 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 		{
 			videoPath,
 			webcamVideoPath,
+			webcamOffsetSeconds = 0,
 			webcamLayoutPreset,
 			webcamMaskShape,
 			webcamMirrored = false,
@@ -301,6 +304,12 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 		const outerWrapperRef = useRef<HTMLDivElement | null>(null);
 		const [webcamLayout, setWebcamLayout] = useState<StyledRenderRect | null>(null);
 		const [webcamDimensions, setWebcamDimensions] = useState<Size | null>(null);
+		const [webcamDuration, setWebcamDuration] = useState(0);
+		const webcamSourceTime = webcamSourceTimeSeconds(
+			currentTime,
+			webcamOffsetSeconds,
+			webcamDuration,
+		);
 		const currentTimeRef = useRef(0);
 		const zoomRegionsRef = useRef<ZoomRegion[]>([]);
 		const cursorTelemetryRef = useRef<CursorTelemetryPoint[]>([]);
@@ -1797,10 +1806,12 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 			const webcamVideo = webcamVideoRef.current;
 			if (!webcamVideo || !webcamVideoPath) {
 				setWebcamDimensions(null);
+				setWebcamDuration(0);
 				return;
 			}
 
 			const handleLoadedMetadata = () => {
+				setWebcamDuration(webcamVideo.duration > 0 ? webcamVideo.duration : 0);
 				if (webcamVideo.videoWidth > 0 && webcamVideo.videoHeight > 0) {
 					setWebcamDimensions({
 						width: webcamVideo.videoWidth,
@@ -1821,6 +1832,10 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 			if (!webcamVideo || !webcamVideoPath) {
 				return;
 			}
+			if (webcamSourceTime === null) {
+				webcamVideo.pause();
+				return;
+			}
 
 			const activeSpeedRegion =
 				speedRegions.find(
@@ -1830,20 +1845,20 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 
 			if (!isPlaying) {
 				webcamVideo.pause();
-				if (Math.abs(webcamVideo.currentTime - currentTime) > 0.05) {
-					webcamVideo.currentTime = currentTime;
+				if (Math.abs(webcamVideo.currentTime - webcamSourceTime) > 0.05) {
+					webcamVideo.currentTime = webcamSourceTime;
 				}
 				return;
 			}
 
-			if (Math.abs(webcamVideo.currentTime - currentTime) > 0.15) {
-				webcamVideo.currentTime = currentTime;
+			if (Math.abs(webcamVideo.currentTime - webcamSourceTime) > 0.15) {
+				webcamVideo.currentTime = webcamSourceTime;
 			}
 
 			webcamVideo.play().catch(() => {
 				// Ignore webcam autoplay restoration failures.
 			});
-		}, [currentTime, isPlaying, speedRegions, webcamVideoPath]);
+		}, [currentTime, isPlaying, speedRegions, webcamVideoPath, webcamSourceTime]);
 
 		useEffect(() => {
 			const webcamVideo = webcamVideoRef.current;
@@ -1852,7 +1867,6 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 			}
 
 			webcamVideo.pause();
-			webcamVideo.currentTime = 0;
 		}, [webcamVideoPath]);
 
 		useEffect(() => {
@@ -1941,7 +1955,7 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 										width: webcamLayout?.width ?? 0,
 										height: webcamLayout?.height ?? 0,
 										zIndex: 20,
-										opacity: webcamLayout ? 1 : 0,
+										opacity: webcamLayout && webcamSourceTime !== null ? 1 : 0,
 										filter:
 											useClipPath && webcamCssBoxShadow !== "none"
 												? `drop-shadow(${webcamCssBoxShadow})`

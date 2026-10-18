@@ -20,7 +20,7 @@ import {
 	Upload,
 	X,
 } from "lucide-react";
-import { type ComponentType, useCallback, useMemo, useRef, useState } from "react";
+import { type ComponentType, type ReactNode, useCallback, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import defaultCursorPreviewUrl from "@/assets/cursors/Cursor=Default.svg";
 import {
@@ -295,6 +295,7 @@ interface SettingsPanelProps {
 	onGifSizePresetChange?: (preset: GifSizePreset) => void;
 	gifOutputDimensions?: { width: number; height: number };
 	onExport?: () => void;
+	hyperframesExportControl?: ReactNode;
 	onExportPanelOpen?: () => void;
 	unsavedExport?: {
 		arrayBuffer: ArrayBuffer;
@@ -435,6 +436,7 @@ export function SettingsPanel({
 	onGifSizePresetChange,
 	gifOutputDimensions = DEFAULT_GIF_SETTINGS.outputDimensions,
 	onExport,
+	hyperframesExportControl,
 	onExportPanelOpen,
 	unsavedExport,
 	onSaveUnsavedExport,
@@ -2181,6 +2183,7 @@ export function SettingsPanel({
 							<Download className="w-4 h-4" />
 							{exportFormat === "gif" ? t("export.gifButton") : t("export.videoButton")}
 						</Button>
+						{hyperframesExportControl}
 					</>
 				)}
 

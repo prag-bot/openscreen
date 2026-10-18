@@ -85,6 +85,10 @@ ipcMain.on("hud-overlay-set-size", (_event, width: number, height: number) => {
  * primary display. Follows the user across macOS Spaces so it isn't lost on switch.
  */
 export function createHudOverlayWindow(): BrowserWindow {
+	if (hudOverlayWindow && !hudOverlayWindow.isDestroyed()) {
+		return hudOverlayWindow;
+	}
+
 	const primaryDisplay = screen.getPrimaryDisplay();
 	const { workArea } = primaryDisplay;
 

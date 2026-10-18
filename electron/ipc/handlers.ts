@@ -16,13 +16,17 @@ import {
 	shell,
 	systemPreferences,
 } from "electron";
-import type { NativeMacRecordingRequest } from "../../src/lib/nativeMacRecording";
+import {
+	type NativeMacRecordingRequest,
+	requireNativeMacScreenStartTime,
+} from "../../src/lib/nativeMacRecording";
 import type { NativeWindowsRecordingRequest } from "../../src/lib/nativeWindowsRecording";
 import {
 	type CursorCaptureMode,
 	normalizeCursorCaptureMode,
 	normalizeProjectMedia,
 	normalizeRecordingSession,
+	normalizeWebcamOffsetSeconds,
 	type ProjectMedia,
 	type RecordedVideoAssetInput,
 	type RecordingSession,
@@ -35,12 +39,19 @@ import type {
 	ProjectFileResult,
 	ProjectPathResult,
 } from "../../src/native/contracts";
+import { selectSupplementalAudioTrack } from "../audioTrackSelection";
 import { mainT } from "../i18n";
 import { RECORDINGS_DIR } from "../main";
 import { createCursorRecordingSession } from "../native-bridge/cursor/recording/factory";
 import { requestMacCursorAccessibilityAccess } from "../native-bridge/cursor/recording/macNativeCursorRecordingSession";
 import type { CursorRecordingSession } from "../native-bridge/cursor/recording/session";
+import {
+	assertNativeMacCaptureIsolation,
+	withRecorderCaptureExclusion,
+} from "../native-bridge/macCaptureIsolation";
 import { patchWebmDurationOnDisk } from "../recording/webm-duration";
+import { registerAutoEditHandlers } from "./autoEdit";
+import { registerHyperframesExportHandler } from "./hyperframesExport";
 import { registerNativeBridgeHandlers } from "./nativeBridge";
 import { RecordingStreamRegistry, registerRecordingStreamHandlers } from "./recordingStream";
 
@@ -133,16 +144,6 @@ function runProcess(
 	});
 }
 
-function parseAfinfoAudioTrackBitrates(output: string): number[] {
-	const bitrates: number[] = [];
-	const trackSections = output.split(/\n----\n/g).slice(1);
-	for (const section of trackSections) {
-		const match = section.match(/\bbit rate:\s*([0-9]+)\s*bits per second/i);
-		bitrates.push(match ? Number(match[1]) : 0);
-	}
-	return bitrates;
-}
-
 async function prepareSupplementalPreviewAudioTrack(videoPath: string) {
 	const normalizedPath = await approveReadableVideoPath(videoPath);
 	if (!normalizedPath) {
@@ -161,16 +162,9 @@ async function prepareSupplementalPreviewAudioTrack(videoPath: string) {
 		return { success: true, path: null };
 	}
 
-	const bitrates = parseAfinfoAudioTrackBitrates(`${afinfo.stdout}\n${afinfo.stderr}`);
-	if (bitrates.length <= 1) {
+	const supplementalTrackIndex = selectSupplementalAudioTrack(`${afinfo.stdout}\n${afinfo.stderr}`);
+	if (supplementalTrackIndex === null) {
 		return { success: true, path: null };
-	}
-
-	let supplementalTrackIndex = 1;
-	for (let index = 2; index < bitrates.length; index += 1) {
-		if (bitrates[index] > bitrates[supplementalTrackIndex]) {
-			supplementalTrackIndex = index;
-		}
 	}
 
 	await fs.mkdir(PREVIEW_AUDIO_DIR, { recursive: true });
@@ -332,9 +326,12 @@ async function getApprovedProjectSession(
 		throw new Error("Project references an invalid or unsupported webcam video path");
 	}
 
-	return webcamVideoPath
-		? { screenVideoPath, webcamVideoPath, createdAt: Date.now() }
-		: { screenVideoPath, createdAt: Date.now() };
+	return {
+		...media,
+		screenVideoPath,
+		...(webcamVideoPath ? { webcamVideoPath } : {}),
+		createdAt: Date.now(),
+	};
 }
 
 type SelectedSource = {
@@ -348,6 +345,7 @@ type AttachNativeMacWebcamRecordingInput = {
 	screenVideoPath?: string;
 	recordingId?: number;
 	webcam?: RecordedVideoAssetInput;
+	webcamOffsetSeconds?: number;
 	cursorCaptureMode?: CursorCaptureMode;
 };
 
@@ -1076,7 +1074,7 @@ function attachNativeMacCaptureOutputDrain(proc: ChildProcessWithoutNullStreams)
 }
 
 function waitForNativeMacCaptureStart(proc: ChildProcessWithoutNullStreams) {
-	return new Promise<void>((resolve, reject) => {
+	return new Promise<number>((resolve, reject) => {
 		const timer = setTimeout(() => {
 			cleanup();
 			reject(new Error("Timed out waiting for native macOS capture to start"));
@@ -1085,7 +1083,12 @@ function waitForNativeMacCaptureStart(proc: ChildProcessWithoutNullStreams) {
 		const inspect = (event: Record<string, unknown>) => {
 			if (event.event === "recording-started") {
 				cleanup();
-				resolve();
+				try {
+					assertNativeMacCaptureIsolation(event, process.pid);
+					resolve(requireNativeMacScreenStartTime(event));
+				} catch (error) {
+					reject(error);
+				}
 				return;
 			}
 			if (event.event === "error") {
@@ -1267,6 +1270,27 @@ export function registerIpcHandlers(
 	onRecordingStateChange?: (recording: boolean, sourceName: string) => void,
 	_switchToHud?: () => void,
 ) {
+	registerAutoEditHandlers({
+		resolveApprovedMediaPath: async (filePath) => {
+			const approved = resolveApprovedVideoPath(filePath);
+			if (!approved || !path.isAbsolute(approved)) return null;
+			const canonical = await fs.realpath(approved);
+			return resolveApprovedVideoPath(canonical);
+		},
+		approvePath: approveFilePath,
+		revokePath: (filePath) => approvedPaths.delete(path.resolve(filePath)),
+	});
+	registerHyperframesExportHandler({
+		getMainWindow,
+		resolveApprovedMediaPath: async (filePath) => {
+			const approved = resolveApprovedVideoPath(filePath);
+			if (!approved || !path.isAbsolute(approved)) return null;
+			// A symlink inside an approved directory must not grant access outside it.
+			const canonical = await fs.realpath(approved);
+			return resolveApprovedVideoPath(canonical);
+		},
+	});
+
 	async function requestScreenAccess() {
 		if (process.platform !== "darwin") {
 			return { success: true, granted: true, status: "granted" };
@@ -1765,33 +1789,36 @@ export function registerIpcHandlers(
 						null)
 					: getSelectedDisplay();
 			const bounds = request.source.bounds ?? sourceDisplay?.bounds ?? getSelectedSourceBounds();
-			const config: NativeMacRecordingRequest = {
-				...request,
-				schemaVersion: 1,
-				recordingId,
-				source: {
-					...request.source,
-					bounds,
+			const config = withRecorderCaptureExclusion(
+				{
+					...request,
+					schemaVersion: 1,
+					recordingId,
+					source: {
+						...request.source,
+						bounds,
+					},
+					video: {
+						...request.video,
+						hideSystemCursor: cursorCaptureMode === "editable-overlay",
+					},
+					webcam: {
+						...request.webcam,
+						enabled: false,
+					},
+					cursor: {
+						mode: cursorCaptureMode,
+					},
+					outputs: {
+						screenPath: outputPath,
+						manifestPath: path.join(
+							RECORDINGS_DIR,
+							`${RECORDING_FILE_PREFIX}${recordingId}${RECORDING_SESSION_SUFFIX}`,
+						),
+					},
 				},
-				video: {
-					...request.video,
-					hideSystemCursor: cursorCaptureMode === "editable-overlay",
-				},
-				webcam: {
-					...request.webcam,
-					enabled: false,
-				},
-				cursor: {
-					mode: cursorCaptureMode,
-				},
-				outputs: {
-					screenPath: outputPath,
-					manifestPath: path.join(
-						RECORDINGS_DIR,
-						`${RECORDING_FILE_PREFIX}${recordingId}${RECORDING_SESSION_SUFFIX}`,
-					),
-				},
-			};
+				process.pid,
+			);
 
 			console.info("[native-sck] starting macOS capture", {
 				helperPath,
@@ -1828,8 +1855,7 @@ export function registerIpcHandlers(
 			nativeMacCaptureProcess = proc;
 			attachNativeMacCaptureOutputDrain(proc);
 
-			await waitForNativeMacCaptureStart(proc);
-			const captureStartedAtMs = Date.now();
+			const captureStartedAtMs = await waitForNativeMacCaptureStart(proc);
 			nativeMacCursorOffsetMs =
 				cursorCaptureMode === "editable-overlay"
 					? Math.max(0, captureStartedAtMs - cursorStartTimeMs)
@@ -1845,6 +1871,7 @@ export function registerIpcHandlers(
 				recordingId,
 				path: outputPath,
 				helperPath,
+				screenStartedAtUnixMs: captureStartedAtMs,
 			};
 		} catch (error) {
 			console.error("Failed to start native macOS recording:", error);
@@ -2155,6 +2182,16 @@ export function registerIpcHandlers(
 				if (!payload.webcam?.fileName || !payload.webcam.videoData) {
 					return { success: false, error: "Native macOS webcam attachment is missing video data." };
 				}
+				if (
+					typeof payload.webcamOffsetSeconds !== "number" ||
+					!Number.isFinite(payload.webcamOffsetSeconds) ||
+					Math.abs(payload.webcamOffsetSeconds) > 86400
+				) {
+					return {
+						success: false,
+						error: "Native macOS webcam attachment requires its measured start offset.",
+					};
+				}
 
 				const webcamVideoPath = resolveRecordingOutputPath(payload.webcam.fileName);
 				await fs.writeFile(webcamVideoPath, Buffer.from(payload.webcam.videoData));
@@ -2167,6 +2204,7 @@ export function registerIpcHandlers(
 				const session: RecordingSession = {
 					screenVideoPath,
 					webcamVideoPath,
+					webcamOffsetSeconds: payload.webcamOffsetSeconds,
 					createdAt,
 					...(cursorCaptureMode ? { cursorCaptureMode } : {}),
 				};
@@ -2248,7 +2286,10 @@ export function registerIpcHandlers(
 				patches.push(patchWebmDurationOnDisk(screenVideoPath, payload.durationMs));
 			}
 			if (webcamStreamed && webcamVideoPath) {
-				patches.push(patchWebmDurationOnDisk(webcamVideoPath, payload.durationMs));
+				const cameraDurationMs =
+					payload.durationMs - normalizeWebcamOffsetSeconds(payload.webcamOffsetSeconds) * 1000;
+				if (isValidDurationMs(cameraDurationMs))
+					patches.push(patchWebmDurationOnDisk(webcamVideoPath, cameraDurationMs));
 			}
 			await Promise.all(patches);
 		}
@@ -2258,6 +2299,9 @@ export function registerIpcHandlers(
 					screenVideoPath,
 					webcamVideoPath,
 					createdAt,
+					...(payload.webcamOffsetSeconds !== undefined
+						? { webcamOffsetSeconds: normalizeWebcamOffsetSeconds(payload.webcamOffsetSeconds) }
+						: {}),
 					...(cursorCaptureMode ? { cursorCaptureMode } : {}),
 				}
 			: { screenVideoPath, createdAt, ...(cursorCaptureMode ? { cursorCaptureMode } : {}) };

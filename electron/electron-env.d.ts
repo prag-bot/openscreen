@@ -154,6 +154,7 @@ interface Window {
 			screenVideoPath: string;
 			recordingId: number;
 			webcam: import("../src/lib/recordingSession").RecordedVideoAssetInput;
+			webcamOffsetSeconds: number;
 			cursorCaptureMode?: import("../src/lib/recordingSession").CursorCaptureMode;
 		}) => Promise<{
 			success: boolean;
@@ -263,7 +264,19 @@ interface Window {
 		revealInFolder: (
 			filePath: string,
 		) => Promise<{ success: boolean; error?: string; message?: string }>;
+		exportHyperframesProject: (
+			request: import("../src/lib/exporter/hyperframesExporter").HyperframesExportRequest,
+		) => Promise<import("../src/lib/exporter/hyperframesExporter").HyperframesExportResult>;
 		getShortcuts: () => Promise<Record<string, unknown> | null>;
+		getAutoEditStatus: () => Promise<import("../src/lib/autoEdit").AutoEditStatus>;
+		prepareAutoEditAudio: (request: {
+			jobId: string;
+			videoPath: string;
+		}) => Promise<{ success: boolean; path?: string; error?: string }>;
+		planAutoEdit: (
+			request: import("../src/lib/autoEdit").AutoEditRequest,
+		) => Promise<import("../src/lib/autoEdit").AutoEditResult>;
+		cancelAutoEdit: (jobId: string) => Promise<{ success: boolean }>;
 		saveShortcuts: (shortcuts: unknown) => Promise<{ success: boolean; error?: string }>;
 		updateGlobalShortcut: (binding: {
 			key: string;

@@ -1,5 +1,6 @@
 import { WebDemuxer } from "web-demuxer";
 import type { SpeedRegion, TrimRegion } from "@/components/video-editor/types";
+import { canonicalRemovalRanges, removedDurationBefore } from "@/lib/removalRanges";
 import type { ExportAudioMuxerCodec, VideoMuxer } from "./muxer";
 
 const AUDIO_BITRATE = 128_000;
@@ -222,7 +223,9 @@ export class AudioProcessor {
 		validatedDurationSec: number,
 		exportCodec: ExportAudioCodec,
 	): Promise<void> {
-		const sortedTrims = trimRegions ? [...trimRegions].sort((a, b) => a.startMs - b.startMs) : [];
+		const sortedTrims = canonicalRemovalRanges(validatedDurationSec * 1000, trimRegions).map(
+			(range, index) => ({ ...range, id: `audio-removal-${index}` }),
+		);
 		const sortedSpeedRegions = speedRegions
 			? [...speedRegions]
 					.filter((region) => region.endMs - region.startMs > MIN_SPEED_REGION_DELTA_MS)
@@ -810,13 +813,7 @@ export class AudioProcessor {
 	}
 
 	private computeTrimOffset(timestampMs: number, trims: TrimRegion[]): number {
-		let offset = 0;
-		for (const trim of trims) {
-			if (trim.endMs <= timestampMs) {
-				offset += trim.endMs - trim.startMs;
-			}
-		}
-		return offset;
+		return removedDurationBefore(timestampMs, trims);
 	}
 
 	cancel(): void {

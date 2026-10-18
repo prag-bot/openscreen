@@ -1,0 +1,226 @@
+import { describe, expect, it } from "vitest";
+import {
+	buildKeptClipSegments,
+	createHyperframesComposition,
+	type HyperframesExportRequest,
+	mapKeptClipsToMedia,
+	validateHyperframesExportRequest,
+} from "./hyperframesExporter";
+
+export const hyperframesRequest: HyperframesExportRequest = {
+	screenVideoPath: "/recording.webm",
+	durationSeconds: 2,
+	width: 640,
+	height: 480,
+	trimRegions: [{ id: "trim-1", startMs: 500, endMs: 1000 }],
+	webcamLayoutPreset: "picture-in-picture",
+	webcamSizePreset: 25,
+	webcamPosition: { cx: 0.8, cy: 0.8 },
+	webcamMaskShape: "circle",
+	webcamMirrored: true,
+};
+
+const screen = { src: "assets/screen.webm", width: 640, height: 480, durationSeconds: 2 };
+
+describe("HyperFrames segment mapping", () => {
+	it("converts millisecond REMOVALS into second-based kept clips", () => {
+		expect(buildKeptClipSegments(2, hyperframesRequest.trimRegions)).toEqual([
+			{ sourceStart: 0, timelineStart: 0, duration: 0.5 },
+			{ sourceStart: 1, timelineStart: 0.5, duration: 1 },
+		]);
+	});
+
+	it("merges unsorted, nested, overlapping and touching removals without resurrecting footage", () => {
+		const ranges = [
+			[7000, 8000],
+			[3000, 5000],
+			[2000, 4000],
+			[2500, 2800],
+			[5000, 6000],
+		];
+		expect(
+			buildKeptClipSegments(
+				10,
+				ranges.map(([startMs, endMs]) => ({ id: "", startMs, endMs })),
+			),
+		).toEqual([
+			{ sourceStart: 0, timelineStart: 0, duration: 2 },
+			{ sourceStart: 6, timelineStart: 2, duration: 1 },
+			{ sourceStart: 8, timelineStart: 3, duration: 2 },
+		]);
+	});
+
+	it("clamps out-of-bounds removals and ignores empty ranges", () => {
+		expect(
+			buildKeptClipSegments(2, [
+				{ id: "", startMs: -200, endMs: 300 },
+				{ id: "", startMs: 500, endMs: 500 },
+				{ id: "", startMs: 1800, endMs: 9000 },
+			]),
+		).toEqual([{ sourceStart: 0.3, timelineStart: 0, duration: 1.5 }]);
+	});
+
+	it("keeps the full recording without trims and does not mutate trim state", () => {
+		expect(buildKeptClipSegments(2, [])).toEqual([
+			{ sourceStart: 0, timelineStart: 0, duration: 2 },
+		]);
+		const input = structuredClone(hyperframesRequest.trimRegions);
+		buildKeptClipSegments(2, input);
+		expect(input).toEqual(hyperframesRequest.trimRegions);
+	});
+
+	it.each([
+		0,
+		-1,
+		Number.NaN,
+		Number.POSITIVE_INFINITY,
+		86401,
+	])("rejects invalid duration %s", (duration) => {
+		expect(() => buildKeptClipSegments(duration, [])).toThrow(/duration/i);
+	});
+
+	it("rejects invalid ranges and a completely removed recording", () => {
+		expect(() => buildKeptClipSegments(2, [{ id: "", startMs: 500, endMs: 200 }])).toThrow();
+		expect(() => buildKeptClipSegments(2, [{ id: "", startMs: 0, endMs: 2000 }])).toThrow(
+			/All footage/,
+		);
+		expect(() =>
+			buildKeptClipSegments(2, [{ id: "", startMs: Number.NaN, endMs: 2000 }]),
+		).toThrow();
+	});
+
+	it("applies delayed camera source offsets after trimming while retaining gaps", () => {
+		const kept = buildKeptClipSegments(2, hyperframesRequest.trimRegions);
+		expect(mapKeptClipsToMedia(kept, 0.2, 1.5)).toEqual([
+			{ sourceStart: 0, timelineStart: 0.2, duration: 0.3 },
+			{ sourceStart: 0.8, timelineStart: 0.5, duration: 0.7 },
+		]);
+	});
+
+	it("handles a camera starting earlier and one starting inside a removed region", () => {
+		const kept = buildKeptClipSegments(2, hyperframesRequest.trimRegions);
+		expect(mapKeptClipsToMedia(kept, -0.25, 2.25)).toEqual([
+			{ sourceStart: 0.25, timelineStart: 0, duration: 0.5 },
+			{ sourceStart: 1.25, timelineStart: 0.5, duration: 1 },
+		]);
+		expect(mapKeptClipsToMedia(kept, 0.75, 1.25)).toEqual([
+			{ sourceStart: 0.25, timelineStart: 0.5, duration: 1 },
+		]);
+		expect(mapKeptClipsToMedia(kept, 4, 2)).toEqual([]);
+	});
+});
+
+describe("HyperFrames HTML contract", () => {
+	it("sizes the root and synchronously registers its exact paused timeline with local GSAP", () => {
+		const { html, durationSeconds } = createHyperframesComposition(hyperframesRequest, {
+			screen,
+			audio: [],
+		});
+		const document = new DOMParser().parseFromString(html, "text/html");
+		const root = document.querySelector("[data-composition-id]");
+		expect(root?.parentElement?.tagName).toBe("BODY");
+		expect(root?.getAttribute("data-duration")).toBe("1.5");
+		expect(root?.getAttribute("data-start")).toBe("0");
+		expect(root?.getAttribute("data-width")).toBe("640");
+		expect(root?.getAttribute("data-height")).toBe("480");
+		expect(html).toContain("width:640px; height:480px");
+		expect(html).toContain('window.__timelines["openscreen"] = gsap.timeline({ paused: true })');
+		expect(html).toContain('src="vendor/gsap.min.js"');
+		expect(html).not.toMatch(/\.play\(|\.pause\(|currentTime\s*=|https?:\/\//);
+		expect(durationSeconds).toBe(1.5);
+		expect(root?.querySelectorAll("video")).toHaveLength(2);
+		expect(root?.querySelector(".webcam")).toBeNull();
+	});
+
+	it("keeps all timed media as direct root children with matching screen/audio offsets", () => {
+		const { html } = createHyperframesComposition(hyperframesRequest, {
+			screen,
+			webcam: { ...screen, src: "assets/webcam.webm" },
+			audio: [{ src: "assets/screen-audio-1.webm", offsetSeconds: 0, durationSeconds: 2 }],
+		});
+		const document = new DOMParser().parseFromString(html, "text/html");
+		const root = document.getElementById("openscreen");
+		for (const element of document.querySelectorAll("video,audio")) {
+			expect(element.parentElement).toBe(root);
+			for (const key of [
+				"id",
+				"data-start",
+				"data-duration",
+				"data-track-index",
+				"data-media-start",
+			]) {
+				expect(element.hasAttribute(key)).toBe(true);
+			}
+			if (element.tagName === "VIDEO") {
+				expect(element.hasAttribute("muted")).toBe(true);
+				expect(element.hasAttribute("playsinline")).toBe(true);
+			}
+		}
+		expect(root?.querySelectorAll("video")).toHaveLength(4);
+		expect(root?.querySelectorAll("audio")).toHaveLength(2);
+		expect(document.getElementById("screen-2")?.getAttribute("data-media-start")).toBe("1");
+		expect(document.getElementById("audio-1-2")?.getAttribute("data-media-start")).toBe("1");
+		expect(html).toContain("clip-path:circle(50% at 50% 50%)");
+		expect(html).toContain("transform:scaleX(-1)");
+	});
+
+	it("omits hidden camera clips entirely instead of relying on opacity", () => {
+		const { html } = createHyperframesComposition(
+			{ ...hyperframesRequest, webcamLayoutPreset: "no-webcam" },
+			{
+				screen,
+				webcam: { ...screen, src: "assets/webcam.webm" },
+				audio: [],
+			},
+		);
+		expect(html).not.toContain('id="webcam-');
+		expect(html).not.toContain('src="assets/webcam.webm"');
+	});
+
+	it("escapes media names and prevents HTML/script injection", () => {
+		const malicious = 'assets/a" onerror="alert(1)<script>&\'.webm';
+		const { html } = createHyperframesComposition(hyperframesRequest, {
+			screen: { ...screen, src: malicious },
+			audio: [],
+		});
+		const document = new DOMParser().parseFromString(html, "text/html");
+		expect(document.querySelector("video")?.getAttribute("src")).toBe(malicious);
+		expect(document.querySelector("video")?.hasAttribute("onerror")).toBe(false);
+		expect(document.querySelectorAll("script")).toHaveLength(2);
+	});
+});
+
+describe("HyperFrames IPC payload validation", () => {
+	it("accepts a screen-only request and validates each layout/mask", () => {
+		expect(validateHyperframesExportRequest(hyperframesRequest).screenVideoPath).toBe(
+			"/recording.webm",
+		);
+		for (const layout of ["no-webcam", "dual-frame", "vertical-stack", "picture-in-picture"]) {
+			expect(
+				validateHyperframesExportRequest({ ...hyperframesRequest, webcamLayoutPreset: layout })
+					.webcamLayoutPreset,
+			).toBe(layout);
+		}
+	});
+
+	it.each([
+		{ width: Number.NaN },
+		{ height: -1 },
+		{ width: 99999 },
+		{ width: 3.5 },
+		{ webcamSizePreset: 100 },
+		{ webcamOffsetSeconds: Number.NaN },
+		{ webcamPosition: { cx: 2, cy: 0 } },
+		{ webcamPosition: {} },
+		{ webcamMirrored: "true" },
+		{ webcamLayoutPreset: "injected" },
+		{ webcamMaskShape: "injected" },
+		{ trimRegions: null },
+		{ screenVideoPath: "" },
+		{ screenVideoPath: "\0" },
+		{ webcamVideoPath: "" },
+		{ durationSeconds: 0 },
+	])("rejects malformed values %s", (patch) => {
+		expect(() => validateHyperframesExportRequest({ ...hyperframesRequest, ...patch })).toThrow();
+	});
+});

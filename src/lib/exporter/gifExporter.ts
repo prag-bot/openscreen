@@ -9,6 +9,7 @@ import type {
 	ZoomRegion,
 } from "@/components/video-editor/types";
 import { BackgroundLoadError } from "@/lib/wallpaper";
+import { buildWebcamDecodeTimeline, webcamSourceTimeSeconds } from "@/lib/webcamTimeline";
 import type { CursorRecordingData } from "@/native/contracts";
 import { getPlatform } from "@/utils/platformUtils";
 import { FrameRenderer } from "./frameRenderer";
@@ -27,6 +28,7 @@ const GIF_WORKER_URL = new URL("gif.js/dist/gif.worker.js", import.meta.url).toS
 interface GifExporterConfig {
 	videoUrl: string;
 	webcamVideoUrl?: string;
+	webcamOffsetSeconds?: number;
 	width: number;
 	height: number;
 	frameRate: GifFrameRate;
@@ -219,7 +221,16 @@ export class GifExporter {
 			console.log("[GifExporter] Using streaming decode (web-demuxer + VideoDecoder)");
 
 			let frameIndex = 0;
-			webcamFrameQueue = this.config.webcamVideoUrl ? new TimestampedVideoFrameQueue() : null;
+			const webcamTimeline = webcamInfo
+				? buildWebcamDecodeTimeline(
+						videoInfo.duration,
+						webcamInfo.duration,
+						this.config.webcamOffsetSeconds,
+						this.config.trimRegions,
+						this.config.speedRegions,
+					)
+				: null;
+			webcamFrameQueue = webcamTimeline?.hasFrames ? new TimestampedVideoFrameQueue() : null;
 			let stopWebcamDecode = false;
 			let webcamDecodeError: Error | null = null;
 			const webcamDecodePromise =
@@ -229,8 +240,8 @@ export class GifExporter {
 							return this.webcamDecoder
 								.decodeAll(
 									this.config.frameRate,
-									this.config.trimRegions,
-									this.config.speedRegions,
+									webcamTimeline?.trimRegions,
+									webcamTimeline?.speedRegions,
 									async (webcamFrame, _exportTimestampUs, webcamSourceTimestampMs) => {
 										while (queue.length >= 12 && !this.cancelled && !stopWebcamDecode) {
 											await new Promise((resolve) => setTimeout(resolve, 2));
@@ -269,9 +280,15 @@ export class GifExporter {
 							return;
 						}
 
-						webcamFrame = webcamFrameQueue
-							? await webcamFrameQueue.frameAt(sourceTimestampMs)
-							: null;
+						const webcamTime = webcamSourceTimeSeconds(
+							sourceTimestampMs / 1000,
+							this.config.webcamOffsetSeconds,
+							webcamInfo?.duration ?? 0,
+						);
+						webcamFrame =
+							webcamFrameQueue && webcamTime !== null
+								? await webcamFrameQueue.frameAt(webcamTime * 1000)
+								: null;
 						const renderer = this.renderer;
 						if (this.cancelled || !renderer) {
 							return;

@@ -27,13 +27,13 @@ import { useAudioLevelMeter } from "../../hooks/useAudioLevelMeter";
 import { useCameraDevices } from "../../hooks/useCameraDevices";
 import { useMicrophoneDevices } from "../../hooks/useMicrophoneDevices";
 import { useScreenRecorder } from "../../hooks/useScreenRecorder";
-import { requestCameraAccess } from "../../lib/requestCameraAccess";
 import { formatTimePadded } from "../../utils/timeUtils";
 import { AudioLevelMeter } from "../ui/audio-level-meter";
 import { Button } from "../ui/button";
 import { Tooltip } from "../ui/tooltip";
 import styles from "./LaunchWindow.module.css";
 import { openSourceSelectorWithPermissionRetry } from "./openSourceSelectorFlow";
+import { DEFAULT_WEBCAM_PREVIEW_SIZE, WebcamPreview } from "./WebcamPreview";
 
 const ICON_SIZE = 20;
 
@@ -41,6 +41,10 @@ const ICON_SIZE = 20;
 const HUD_DEVICE_POPUP_GAP = 28;
 // Horizontal layout: mirrors the `bottom-[68px]` class on the popup element.
 const HUD_DEVICE_POPUP_HORIZONTAL_BOTTOM = 68;
+const HUD_BAR_BOTTOM = 20;
+const HUD_TOP_MARGIN = 24;
+// Keep a useful scrollable slice of the vertical tray visible on short displays.
+const HUD_MIN_VISIBLE_TRAY_HEIGHT = 96;
 
 const ICON_CONFIG = {
 	drag: { icon: RxDragHandleDots2, size: ICON_SIZE },
@@ -120,6 +124,7 @@ export function LaunchWindow() {
 		systemAudioEnabled,
 		setSystemAudioEnabled,
 		webcamEnabled,
+		webcamPreviewStream,
 		setWebcamEnabled,
 		webcamDeviceId,
 		setWebcamDeviceId,
@@ -130,6 +135,7 @@ export function LaunchWindow() {
 
 	const showMicControls = microphoneEnabled && !recording;
 	const showWebcamControls = webcamEnabled && !recording;
+	const showDevicePanel = showMicControls || showWebcamControls || webcamEnabled;
 
 	const [isMicHovered, setIsMicHovered] = useState(false);
 	const [isMicFocused, setIsMicFocused] = useState(false);
@@ -147,8 +153,12 @@ export function LaunchWindow() {
 	const languageMenuPanelRef = useRef<HTMLDivElement | null>(null);
 	const hudBarRef = useRef<HTMLDivElement | null>(null);
 	const deviceSelectorRef = useRef<HTMLDivElement | null>(null);
-	// Measured bar height, anchors the popups above the tall vertical tray so they don't overlap it.
+	// Actual rendered bar height, including when the vertical tray is scrolling.
 	const [hudBarHeight, setHudBarHeight] = useState(0);
+	const [devicePanelHeight, setDevicePanelHeight] = useState(0);
+	const [webcamPreviewSize, setWebcamPreviewSize] = useState(DEFAULT_WEBCAM_PREVIEW_SIZE);
+	const verticalTrayReservedHeight =
+		HUD_TOP_MARGIN + (showDevicePanel ? HUD_DEVICE_POPUP_GAP + devicePanelHeight : HUD_BAR_BOTTOM);
 	const [languageMenuStyle, setLanguageMenuStyle] = useState<{
 		right: number;
 		top: number;
@@ -226,16 +236,6 @@ export function LaunchWindow() {
 	}, []);
 
 	useEffect(() => {
-		if (!import.meta.env.DEV) {
-			return;
-		}
-
-		void requestCameraAccess().catch((error) => {
-			console.warn("Failed to trigger camera access request during development:", error);
-		});
-	}, []);
-
-	useEffect(() => {
 		if (!isLanguageMenuOpen) return;
 
 		const handlePointerDown = (event: PointerEvent) => {
@@ -308,35 +308,56 @@ export function LaunchWindow() {
 		const barEl = hudBarRef.current;
 		if (!barEl || !window.electronAPI?.setHudOverlaySize) return;
 
-		// Breathing room so the drop shadow isn't clipped. TOP_MARGIN must also exceed the
-		// slack in the bar's `max-h: calc(100vh - 2.5rem)` cap (40px reserved - 20px bottom
-		// gap = 20px) so the window stays tall enough that the cap never engages and adds a scrollbar.
+		// Breathing room so the drop shadow isn't clipped.
 		const SIDE_MARGIN = 24;
-		const TOP_MARGIN = 24;
 		// Wide enough that the language menu (11rem) never clips, even when the bar is narrow.
 		const MIN_WIDTH = 220;
 
 		const viewportHeight = window.innerHeight;
 		const centerX = window.innerWidth / 2;
 
-		// Use natural (scroll) size, not the clipped box: vertical mode's max-h cap is a
-		// small-screen fallback, and reading clipped height would pin the window to it.
-		// scrollHeight gives full content height; the cap only engages when the main process clamps to screen.
-		let topFromBottom = viewportHeight - barEl.getBoundingClientRect().bottom + barEl.scrollHeight;
+		const barRect = barEl.getBoundingClientRect();
+		// Resize requests must use full content, even when the OS has clamped the
+		// window and the tray scrolls. Include the border excluded by scrollHeight.
+		const naturalBarHeight = Math.max(
+			barRect.height,
+			barEl.scrollHeight + Math.max(0, barEl.offsetHeight - barEl.clientHeight),
+		);
+		let topFromBottom = viewportHeight - barRect.bottom + naturalBarHeight;
 		let halfWidth = barEl.scrollWidth / 2;
 
-		// Popups drive both dimensions too. Their vertical anchor depends on bar height,
-		// which is fed back through React state and lags by a frame, so derive their top
-		// edge from the bar's natural height instead of the stale rendered position. Keeps
-		// one measurement pass authoritative and avoids a feedback re-measure.
+		let panelHeight = 0;
+		let previewSize = DEFAULT_WEBCAM_PREVIEW_SIZE;
 		if (deviceSelectorRef.current) {
 			const rect = deviceSelectorRef.current.getBoundingClientRect();
+			panelHeight = Math.ceil(rect.height);
+			const frame = deviceSelectorRef.current.querySelector<HTMLElement>("[data-hud-webcam-frame]");
+			const frameHeight = frame?.getBoundingClientRect().height ?? 0;
+			const panelChromeHeight = Math.max(0, rect.height - frameHeight);
+			if (frame) {
+				const traySpace =
+					trayLayout === "vertical"
+						? HUD_DEVICE_POPUP_GAP + HUD_MIN_VISIBLE_TRAY_HEIGHT
+						: HUD_DEVICE_POPUP_HORIZONTAL_BOTTOM;
+				previewSize = Math.max(
+					0,
+					Math.min(
+						DEFAULT_WEBCAM_PREVIEW_SIZE,
+						Math.floor(viewportHeight - panelChromeHeight - HUD_TOP_MARGIN - traySpace),
+					),
+				);
+			}
+			// Shrinking the circle is a display fallback, not a smaller desired
+			// window. Compensate for it to keep resize requests stable under a clamp.
+			const naturalPanelHeight = frame
+				? panelChromeHeight + DEFAULT_WEBCAM_PREVIEW_SIZE
+				: rect.height;
 			if (rect.width !== 0 || rect.height !== 0) {
 				const popupBottomOffset =
 					trayLayout === "vertical"
-						? barEl.scrollHeight + HUD_DEVICE_POPUP_GAP
+						? naturalBarHeight + HUD_DEVICE_POPUP_GAP
 						: HUD_DEVICE_POPUP_HORIZONTAL_BOTTOM;
-				topFromBottom = Math.max(topFromBottom, popupBottomOffset + rect.height);
+				topFromBottom = Math.max(topFromBottom, popupBottomOffset + naturalPanelHeight);
 				halfWidth = Math.max(halfWidth, rect.width / 2);
 			}
 		}
@@ -349,12 +370,15 @@ export function LaunchWindow() {
 		}
 
 		setHudBarHeight((prev) => {
-			const next = Math.round(barEl.scrollHeight);
-			return Math.abs(prev - next) > 1 ? next : prev;
+			// Placement uses the actual box, unlike the natural resize request.
+			const next = Math.ceil(barRect.height);
+			return prev === next ? prev : next;
 		});
+		setDevicePanelHeight((prev) => (prev === panelHeight ? prev : panelHeight));
+		setWebcamPreviewSize((prev) => (prev === previewSize ? prev : previewSize));
 
 		const width = Math.max(MIN_WIDTH, Math.ceil(halfWidth * 2) + SIDE_MARGIN);
-		const height = Math.ceil(topFromBottom) + TOP_MARGIN;
+		const height = Math.ceil(topFromBottom) + HUD_TOP_MARGIN;
 		if (width === lastHudSizeRef.current.width && height === lastHudSizeRef.current.height) {
 			return;
 		}
@@ -370,8 +394,10 @@ export function LaunchWindow() {
 		hudResizeObserverRef.current = observer;
 		if (hudBarRef.current) observer.observe(hudBarRef.current);
 		if (deviceSelectorRef.current) observer.observe(deviceSelectorRef.current);
+		window.addEventListener("resize", measureHudSize);
 		measureHudSize();
 		return () => {
+			window.removeEventListener("resize", measureHudSize);
 			observer.disconnect();
 			hudResizeObserverRef.current = null;
 		};
@@ -554,11 +580,10 @@ export function LaunchWindow() {
 			)}
 
 			{/* Device selectors, fixed above HUD bar, viewport-relative, never clipped */}
-			{(showMicControls || showWebcamControls) && (
+			{showDevicePanel && (
 				<div
 					ref={setDeviceSelectorEl}
-					data-hud-interactive="true"
-					className={`fixed left-1/2 -translate-x-1/2 flex items-center gap-2 animate-mic-panel-in ${trayLayout === "vertical" ? "" : "bottom-[68px]"} ${styles.electronNoDrag}`}
+					className={`pointer-events-none fixed left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 animate-mic-panel-in ${trayLayout === "vertical" ? "" : "bottom-[68px]"} ${styles.electronNoDrag}`}
 					style={
 						trayLayout === "vertical"
 							? // Sit above the tall vertical tray, anchored to the measured bar
@@ -567,83 +592,133 @@ export function LaunchWindow() {
 							: undefined
 					}
 				>
-					{/* Mic selector */}
-					{showMicControls && (
-						<div
-							className={`flex h-9 items-center gap-2 overflow-hidden rounded-xl border border-white/[0.08] bg-[#0b0c10]/90 px-3 py-1.5 shadow-[0_18px_42px_rgba(0,0,0,0.4)] backdrop-blur-2xl transition-all duration-300 ${!micExpanded ? "opacity-60 grayscale-[0.5]" : "opacity-100"}`}
-							onMouseEnter={() => setIsMicHovered(true)}
-							onMouseLeave={() => setIsMicHovered(false)}
-							onFocus={() => setIsMicFocused(true)}
-							onBlur={() => setIsMicFocused(false)}
-							style={{ width: micExpanded ? "240px" : "140px", transition: "width 300ms ease" }}
-						>
-							<div className="relative flex-1 min-w-0">
-								{!micExpanded && (
-									<div className="text-white/60 text-[10px] font-medium truncate">
-										{selectedMicLabel}
-									</div>
-								)}
-								<select
-									value={microphoneDeviceId || selectedMicId}
-									onChange={(e) => {
-										const selectedDevice = micDevices.find((d) => d.deviceId === e.target.value);
-										setSelectedMicId(e.target.value);
-										setMicrophoneDeviceId(e.target.value);
-										setMicrophoneDeviceName(selectedDevice?.label);
-									}}
-									className={`w-full appearance-none bg-white/5 text-white text-[11px] rounded-lg pl-2 pr-6 py-1 border border-white/10 outline-none hover:bg-white/10 transition-colors cursor-pointer ${!micExpanded ? "sr-only" : ""}`}
-								>
-									{micDevices.map((device) => (
-										<option key={device.deviceId} value={device.deviceId} className="bg-[#1c1c24]">
-											{device.label}
-										</option>
-									))}
-								</select>
-								{micExpanded && (
-									<ChevronDown
-										size={12}
-										className="absolute right-1.5 top-1/2 -translate-y-1/2 text-white/40 pointer-events-none"
-									/>
-								)}
-							</div>
-							<AudioLevelMeter
-								level={level}
-								className={`${micExpanded ? "w-16" : "w-8"} h-2 transition-all duration-300`}
-							/>
-						</div>
+					{webcamEnabled && (
+						<WebcamPreview
+							stream={webcamPreviewStream}
+							recording={recording}
+							paused={paused}
+							size={webcamPreviewSize}
+						/>
 					)}
-
-					{/* Webcam selector */}
-					{showWebcamControls && (
-						<div
-							className={`flex h-9 items-center gap-2 overflow-hidden rounded-xl border border-white/[0.08] bg-[#0b0c10]/90 px-3 py-1.5 shadow-[0_18px_42px_rgba(0,0,0,0.4)] backdrop-blur-2xl transition-all duration-300 ${!webcamExpanded ? "opacity-60 grayscale-[0.5]" : "opacity-100"}`}
-							onMouseEnter={() => setIsWebcamHovered(true)}
-							onMouseLeave={() => setIsWebcamHovered(false)}
-							onFocus={() => setIsWebcamFocused(true)}
-							onBlur={() => setIsWebcamFocused(false)}
-							style={{ width: webcamExpanded ? "240px" : "140px", transition: "width 300ms ease" }}
-						>
-							<div className="relative flex-1 min-w-0">
-								{!webcamExpanded && (
-									<div className="text-white/60 text-[10px] font-medium truncate">
-										{selectedCameraLabel}
+					{(showMicControls || showWebcamControls) && (
+						<div className="flex items-center gap-2">
+							{/* Mic selector */}
+							{showMicControls && (
+								<div
+									data-hud-interactive="true"
+									className={`pointer-events-auto flex h-9 items-center gap-2 overflow-hidden rounded-xl border border-white/[0.08] bg-[#0b0c10]/90 px-3 py-1.5 shadow-[0_18px_42px_rgba(0,0,0,0.4)] backdrop-blur-2xl transition-all duration-300 ${!micExpanded ? "opacity-60 grayscale-[0.5]" : "opacity-100"}`}
+									onMouseEnter={() => setIsMicHovered(true)}
+									onMouseLeave={() => setIsMicHovered(false)}
+									onFocus={() => setIsMicFocused(true)}
+									onBlur={() => setIsMicFocused(false)}
+									style={{ width: micExpanded ? "240px" : "140px", transition: "width 300ms ease" }}
+								>
+									<div className="relative flex-1 min-w-0">
+										{!micExpanded && (
+											<div className="text-white/60 text-[10px] font-medium truncate">
+												{selectedMicLabel}
+											</div>
+										)}
+										<select
+											value={microphoneDeviceId || selectedMicId}
+											onChange={(e) => {
+												const selectedDevice = micDevices.find(
+													(d) => d.deviceId === e.target.value,
+												);
+												setSelectedMicId(e.target.value);
+												setMicrophoneDeviceId(e.target.value);
+												setMicrophoneDeviceName(selectedDevice?.label);
+											}}
+											className={`w-full appearance-none bg-white/5 text-white text-[11px] rounded-lg pl-2 pr-6 py-1 border border-white/10 outline-none hover:bg-white/10 transition-colors cursor-pointer ${!micExpanded ? "sr-only" : ""}`}
+										>
+											{micDevices.map((device) => (
+												<option
+													key={device.deviceId}
+													value={device.deviceId}
+													className="bg-[#1c1c24]"
+												>
+													{device.label}
+												</option>
+											))}
+										</select>
+										{micExpanded && (
+											<ChevronDown
+												size={12}
+												className="absolute right-1.5 top-1/2 -translate-y-1/2 text-white/40 pointer-events-none"
+											/>
+										)}
 									</div>
-								)}
-								{webcamExpanded &&
-									(isCameraDevicesLoading ? (
-										<span className="text-white/40 text-[10px] italic">
-											{t("webcam.searching")}
-										</span>
-									) : cameraDevicesError ? (
-										<span className="text-white/40 text-[10px] italic">
-											{t("webcam.unavailable")}
-										</span>
-									) : cameraDevices.length === 0 ? (
-										<span className="text-white/40 text-[10px] italic">
-											{t("webcam.noneFound")}
-										</span>
-									) : (
-										<>
+									<AudioLevelMeter
+										level={level}
+										className={`${micExpanded ? "w-16" : "w-8"} h-2 transition-all duration-300`}
+									/>
+								</div>
+							)}
+
+							{/* Webcam selector */}
+							{showWebcamControls && (
+								<div
+									data-hud-interactive="true"
+									className={`pointer-events-auto flex h-9 items-center gap-2 overflow-hidden rounded-xl border border-white/[0.08] bg-[#0b0c10]/90 px-3 py-1.5 shadow-[0_18px_42px_rgba(0,0,0,0.4)] backdrop-blur-2xl transition-all duration-300 ${!webcamExpanded ? "opacity-60 grayscale-[0.5]" : "opacity-100"}`}
+									onMouseEnter={() => setIsWebcamHovered(true)}
+									onMouseLeave={() => setIsWebcamHovered(false)}
+									onFocus={() => setIsWebcamFocused(true)}
+									onBlur={() => setIsWebcamFocused(false)}
+									style={{
+										width: webcamExpanded ? "240px" : "140px",
+										transition: "width 300ms ease",
+									}}
+								>
+									<div className="relative flex-1 min-w-0">
+										{!webcamExpanded && (
+											<div className="text-white/60 text-[10px] font-medium truncate">
+												{selectedCameraLabel}
+											</div>
+										)}
+										{webcamExpanded &&
+											(isCameraDevicesLoading ? (
+												<span className="text-white/40 text-[10px] italic">
+													{t("webcam.searching")}
+												</span>
+											) : cameraDevicesError ? (
+												<span className="text-white/40 text-[10px] italic">
+													{t("webcam.unavailable")}
+												</span>
+											) : cameraDevices.length === 0 ? (
+												<span className="text-white/40 text-[10px] italic">
+													{t("webcam.noneFound")}
+												</span>
+											) : (
+												<>
+													<select
+														value={webcamDeviceId || selectedCameraId}
+														onChange={(e) => {
+															const device = cameraDevices.find(
+																(item) => item.deviceId === e.target.value,
+															);
+															setSelectedCameraId(e.target.value);
+															setWebcamDeviceId(e.target.value);
+															setWebcamDeviceName(device?.label);
+														}}
+														className="w-full appearance-none bg-white/5 text-white text-[11px] rounded-lg pl-2 pr-6 py-1 border border-white/10 outline-none hover:bg-white/10 transition-colors cursor-pointer"
+													>
+														{cameraDevices.map((device) => (
+															<option
+																key={device.deviceId}
+																value={device.deviceId}
+																className="bg-[#1c1c24]"
+															>
+																{device.label}
+															</option>
+														))}
+													</select>
+													<ChevronDown
+														size={12}
+														className="absolute right-1.5 top-1/2 -translate-y-1/2 text-white/40 pointer-events-none"
+													/>
+												</>
+											))}
+										{(!webcamExpanded || cameraDevices.length === 0) && (
 											<select
 												value={webcamDeviceId || selectedCameraId}
 												onChange={(e) => {
@@ -654,43 +729,18 @@ export function LaunchWindow() {
 													setWebcamDeviceId(e.target.value);
 													setWebcamDeviceName(device?.label);
 												}}
-												className="w-full appearance-none bg-white/5 text-white text-[11px] rounded-lg pl-2 pr-6 py-1 border border-white/10 outline-none hover:bg-white/10 transition-colors cursor-pointer"
+												className="sr-only"
 											>
 												{cameraDevices.map((device) => (
-													<option
-														key={device.deviceId}
-														value={device.deviceId}
-														className="bg-[#1c1c24]"
-													>
+													<option key={device.deviceId} value={device.deviceId}>
 														{device.label}
 													</option>
 												))}
 											</select>
-											<ChevronDown
-												size={12}
-												className="absolute right-1.5 top-1/2 -translate-y-1/2 text-white/40 pointer-events-none"
-											/>
-										</>
-									))}
-								{(!webcamExpanded || cameraDevices.length === 0) && (
-									<select
-										value={webcamDeviceId || selectedCameraId}
-										onChange={(e) => {
-											const device = cameraDevices.find((item) => item.deviceId === e.target.value);
-											setSelectedCameraId(e.target.value);
-											setWebcamDeviceId(e.target.value);
-											setWebcamDeviceName(device?.label);
-										}}
-										className="sr-only"
-									>
-										{cameraDevices.map((device) => (
-											<option key={device.deviceId} value={device.deviceId}>
-												{device.label}
-											</option>
-										))}
-									</select>
-								)}
-							</div>
+										)}
+									</div>
+								</div>
+							)}
 						</div>
 					)}
 				</div>
@@ -703,9 +753,16 @@ export function LaunchWindow() {
 				data-tray-layout={trayLayout}
 				className={`fixed bottom-5 left-1/2 -translate-x-1/2 flex rounded-2xl border border-white/[0.10] bg-[#07080a]/90 shadow-[0_20px_60px_rgba(0,0,0,0.42),inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-2xl backdrop-saturate-[140%] ${
 					trayLayout === "vertical"
-						? "max-h-[calc(100vh-2.5rem)] flex-col items-center gap-1 overflow-y-auto px-1 py-1.5"
+						? "flex-col items-center gap-1 overflow-y-auto [&>*]:shrink-0 px-1 py-1.5"
 						: "items-center gap-1.5 px-2 py-1.5"
 				}`}
+				style={
+					trayLayout === "vertical"
+						? {
+								maxHeight: `max(0px, calc(100vh - ${verticalTrayReservedHeight}px))`,
+							}
+						: undefined
+				}
 				onPointerEnter={() => setHudMouseEventsEnabled(true)}
 				onPointerDown={() => setHudMouseEventsEnabled(true)}
 				onMouseEnter={() => setHudMouseEventsEnabled(true)}
