@@ -13,6 +13,11 @@ dist-electron
 dist-ssr
 *.local
 .env
+.env.*
+!.env.example
+*.app/
+/recordings/
+/outputs/
 
 # Native helper build outputs
 /electron/native/wgc-capture/build/
