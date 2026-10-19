@@ -65,8 +65,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
 	requestScreenAccess: () => {
 		return ipcRenderer.invoke("request-screen-access");
 	},
-	requestNativeMacCursorAccess: () => {
-		return ipcRenderer.invoke("request-native-mac-cursor-access");
+	requestNativeMacCursorAccess: (options?: { prompt?: boolean }) => {
+		const prompt =
+			typeof options === "object" &&
+			options !== null &&
+			!Array.isArray(options) &&
+			options.prompt === true;
+		return ipcRenderer.invoke("request-native-mac-cursor-access", { prompt });
 	},
 	storeRecordedVideo: (videoData: ArrayBuffer, fileName: string) => {
 		return ipcRenderer.invoke("store-recorded-video", videoData, fileName);

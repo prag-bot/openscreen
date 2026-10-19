@@ -8,3 +8,4 @@
 - Keep original screen, camera and audio footage intact. AI edits must be validated, reviewable, undoable removal ranges, shared by the editor and HyperFrames export.
 - Reuse the installed Codex CLI login/configuration for optional transcript-based editing; never extract or copy account tokens. Keep transcript processing and quota disclosure explicit.
 - The canonical local app is the Projects copy. Ad-hoc rebuilds change its permission identity: stage and verify updates first, retain the working build, and coordinate app-specific reauthorization before replacing it. Never globally reset privacy permissions or weaken signing requirements to bypass a denial.
+- Keep build staging in a `.noindex` directory and retain rollback builds as verified archives, not additional searchable app bundles. The Projects app is the only user-facing installation; do not create new registered copies when packaging updates.

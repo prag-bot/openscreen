@@ -2,7 +2,7 @@ import { type ChildProcessByStdio, spawn } from "node:child_process";
 import { accessSync, constants as fsConstants } from "node:fs";
 import path from "node:path";
 import type { Readable } from "node:stream";
-import { type Rectangle, screen, systemPreferences } from "electron";
+import { type Rectangle, screen } from "electron";
 import type {
 	CursorRecordingData,
 	CursorRecordingSample,
@@ -79,27 +79,38 @@ export function findMacCursorHelperPath() {
 	return null;
 }
 
-export async function requestMacCursorAccessibilityAccess() {
+export async function requestMacCursorAccessibilityAccess(options?: { prompt?: boolean }) {
 	if (process.platform !== "darwin") {
 		return { success: true, granted: true, status: "granted" };
-	}
-
-	try {
-		systemPreferences.isTrustedAccessibilityClient(true);
-	} catch {
-		// Continue with helper probing; it can trigger the same macOS prompt.
 	}
 
 	const helperPath = findMacCursorHelperPath();
 	if (!helperPath) {
 		return { success: true, granted: false, status: "missing-helper" };
 	}
+	const prompt =
+		typeof options === "object" &&
+		options !== null &&
+		!Array.isArray(options) &&
+		options.prompt === true;
 
 	return new Promise<{ success: boolean; granted: boolean; status: string; error?: string }>(
 		(resolve) => {
-			const child = spawn(helperPath, [JSON.stringify({ sampleIntervalMs: 250 })], {
-				stdio: ["ignore", "pipe", "pipe"],
-			});
+			// Only the helper requests trust: prompting Electron as well stacks OS
+			// dialogs and does not establish the helper's permission identity.
+			const child = spawn(
+				helperPath,
+				[
+					JSON.stringify({
+						sampleIntervalMs: 250,
+						promptAccessibility: prompt,
+						accessibilityProbeOnly: true,
+					}),
+				],
+				{
+					stdio: ["ignore", "pipe", "pipe"],
+				},
+			);
 			let settled = false;
 			let lineBuffer = "";
 			const finish = (result: {
@@ -161,7 +172,8 @@ export async function requestMacCursorAccessibilityAccess() {
 					error: error.message,
 				});
 			});
-			child.once("exit", (code, signal) => {
+			// A probe may exit before its final ready line drains from stdout.
+			child.once("close", (code, signal) => {
 				finish({
 					success: false,
 					granted: false,
@@ -187,7 +199,6 @@ export class MacNativeCursorRecordingSession implements CursorRecordingSession {
 	private process: ChildProcessByStdio<null, Readable, Readable> | null = null;
 	private lineBuffer = "";
 	private startTimeMs = 0;
-	private fallbackInterval: NodeJS.Timeout | null = null;
 	private readyResolve: (() => void) | null = null;
 	private readyReject: ((error: Error) => void) | null = null;
 	private readyTimer: NodeJS.Timeout | null = null;
@@ -207,17 +218,9 @@ export class MacNativeCursorRecordingSession implements CursorRecordingSession {
 		this.previousLeftButtonDown = false;
 		this.consecutiveOutsideSamples = 0;
 
-		try {
-			systemPreferences.isTrustedAccessibilityClient(true);
-		} catch {
-			// Without Accessibility, text/pointer affordance detection is unavailable;
-			// bitmaps are still captured natively via NSCursor.
-		}
-
 		const helperPath = findMacCursorHelperPath();
 		if (!helperPath) {
-			this.startPositionOnlyFallback();
-			return;
+			throw new Error("Editable cursor helper is unavailable. Use the system cursor.");
 		}
 
 		const child = spawn(
@@ -225,6 +228,7 @@ export class MacNativeCursorRecordingSession implements CursorRecordingSession {
 			[
 				JSON.stringify({
 					sampleIntervalMs: this.options.sampleIntervalMs,
+					promptAccessibility: false,
 				}),
 			],
 			{
@@ -258,8 +262,7 @@ export class MacNativeCursorRecordingSession implements CursorRecordingSession {
 		} catch (error) {
 			this.killHelperProcess(child);
 			this.process = null;
-			console.warn("[cursor-macos] falling back to position-only cursor telemetry:", error);
-			this.startPositionOnlyFallback();
+			throw error;
 		}
 	}
 
@@ -267,11 +270,6 @@ export class MacNativeCursorRecordingSession implements CursorRecordingSession {
 		const child = this.process;
 		this.process = null;
 		this.clearReadyState();
-
-		if (this.fallbackInterval) {
-			clearInterval(this.fallbackInterval);
-			this.fallbackInterval = null;
-		}
 
 		if (child) {
 			this.killHelperProcess(child);
@@ -283,13 +281,6 @@ export class MacNativeCursorRecordingSession implements CursorRecordingSession {
 			samples: this.samples,
 			assets: [...this.assets.values()],
 		};
-	}
-
-	private startPositionOnlyFallback() {
-		this.captureSample(Date.now(), null, null, false, false, false);
-		this.fallbackInterval = setInterval(() => {
-			this.captureSample(Date.now(), null, null, false, false, false);
-		}, this.options.sampleIntervalMs);
 	}
 
 	private rememberAsset(asset: MacCursorAssetPayload | null | undefined) {
@@ -332,10 +323,13 @@ export class MacNativeCursorRecordingSession implements CursorRecordingSession {
 
 	private handleEvent(payload: MacCursorEvent) {
 		if (payload.type === "ready") {
-			if (payload.accessibilityTrusted === false) {
-				console.warn(
-					"[cursor-macos] Accessibility is not trusted; text/pointer affordance detection disabled (bitmap capture still active).",
+			if (payload.accessibilityTrusted !== true) {
+				this.rejectReady(
+					new Error(
+						"Editable cursor access is unavailable. Use the system cursor, or enable editable cursor from the HUD and allow Accessibility.",
+					),
 				);
+				return;
 			}
 			this.resolveReady();
 			return;

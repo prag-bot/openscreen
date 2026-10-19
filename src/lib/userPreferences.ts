@@ -3,6 +3,7 @@ import {
 	DEFAULT_EXPORT_SETTINGS,
 } from "@/components/video-editor/editorDefaults";
 import type { ExportFormat, ExportQuality } from "@/lib/exporter";
+import { type CursorCaptureMode, normalizeCursorCaptureMode } from "@/lib/recordingSession";
 import type { AspectRatio } from "@/utils/aspectRatioUtils";
 
 const PREFS_KEY = "openscreen_user_preferences";
@@ -25,6 +26,8 @@ export interface RecordingPreferences {
 	systemAudioEnabled: boolean;
 	/** Arm the live camera preview and camera sidecar for new recordings. */
 	webcamEnabled: boolean;
+	/** System cursor is the quiet default; editable capture requires explicit opt-in. */
+	cursorCaptureMode: CursorCaptureMode;
 }
 
 export interface UserPreferences extends RecordingPreferences {
@@ -55,6 +58,7 @@ export const DEFAULT_PREFS: UserPreferences = {
 	microphoneEnabled: true,
 	systemAudioEnabled: true,
 	webcamEnabled: true,
+	cursorCaptureMode: "system",
 };
 
 /** Parses stored preferences without throwing on malformed JSON. */
@@ -121,6 +125,8 @@ export function loadUserPreferences(): UserPreferences {
 				: DEFAULT_PREFS.systemAudioEnabled,
 		webcamEnabled:
 			typeof raw.webcamEnabled === "boolean" ? raw.webcamEnabled : DEFAULT_PREFS.webcamEnabled,
+		cursorCaptureMode:
+			normalizeCursorCaptureMode(raw.cursorCaptureMode) ?? DEFAULT_PREFS.cursorCaptureMode,
 	};
 }
 

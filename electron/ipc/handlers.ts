@@ -779,7 +779,7 @@ async function resolveDirectShowWebcamClsid(deviceName?: string) {
 	return best.clsid;
 }
 
-async function startCursorRecording(recordingId?: number) {
+async function startCursorRecording(recordingId?: number, requireCursorCapture = false) {
 	if (cursorRecordingSession) {
 		pendingCursorRecordingData = await cursorRecordingSession.stop();
 		cursorRecordingSession = null;
@@ -800,7 +800,13 @@ async function startCursorRecording(recordingId?: number) {
 		await cursorRecordingSession.start();
 	} catch (error) {
 		console.error("Failed to start cursor recording session:", error);
+		try {
+			await cursorRecordingSession.stop();
+		} catch (cleanupError) {
+			console.warn("Failed to clean up cursor recording session:", cleanupError);
+		}
 		cursorRecordingSession = null;
+		if (requireCursorCapture) throw error;
 	}
 }
 
@@ -1407,37 +1413,16 @@ export function registerIpcHandlers(
 		return requestScreenAccess();
 	});
 
-	ipcMain.handle("request-native-mac-cursor-access", async () => {
-		const access = await requestMacCursorAccessibilityAccess();
-
-		// When the editable cursor can't get Accessibility trust, pop a native dialog
-		// that deep-links to the Accessibility pane (mirrors the Screen Recording flow).
-		if (process.platform === "darwin" && !access.granted) {
-			const mainWin = getMainWindow();
-			const detail =
-				access.status === "missing-helper"
-					? "The cursor helper couldn't be found in this build, so the editable cursor can't be enabled. Rebuild the native helper (npm run build:native:mac) or switch the HUD cursor mode to system."
-					: "Allow OpenScreen under System Settings → Privacy & Security → Accessibility, then press record again to start the countdown.";
-			const messageOptions = {
-				type: "warning",
-				buttons: ["Open Accessibility Settings", "Cancel"],
-				defaultId: 0,
-				cancelId: 1,
-				message: "Accessibility access is required for the editable cursor",
-				detail,
-			} satisfies Electron.MessageBoxOptions;
-			const result =
-				mainWin && !mainWin.isDestroyed()
-					? await dialog.showMessageBox(mainWin, messageOptions)
-					: await dialog.showMessageBox(messageOptions);
-			if (result.response === 0) {
-				await shell.openExternal(
-					"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-				);
-			}
-		}
-
-		return access;
+	ipcMain.handle("request-native-mac-cursor-access", async (_, options: unknown) => {
+		// Treat omitted, stale or malformed renderer input as a quiet check. The
+		// explicit HUD opt-in is the only caller that sends a literal true.
+		const prompt =
+			typeof options === "object" &&
+			options !== null &&
+			!Array.isArray(options) &&
+			"prompt" in options &&
+			options.prompt === true;
+		return requestMacCursorAccessibilityAccess({ prompt });
 	});
 
 	ipcMain.handle("open-source-selector", async () => {
@@ -1843,7 +1828,7 @@ export function registerIpcHandlers(
 			const cursorStartTimeMs = Date.now();
 			if (cursorCaptureMode === "editable-overlay") {
 				nativeMacCursorRecordingStartMs = cursorStartTimeMs;
-				await startCursorRecording(cursorStartTimeMs);
+				await startCursorRecording(cursorStartTimeMs, true);
 			} else {
 				pendingCursorRecordingData = null;
 			}

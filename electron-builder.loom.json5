@@ -8,7 +8,7 @@
   },
   "npmRebuild": false,
   "directories": {
-    "output": "release/loom"
+    "output": "release/loom.noindex"
   },
   "mac": {
     "identity": null,

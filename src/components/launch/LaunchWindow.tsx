@@ -19,6 +19,7 @@ import {
 	MdVolumeUp,
 } from "react-icons/md";
 import { RxDragHandleDots2 } from "react-icons/rx";
+import { toast } from "sonner";
 import { useI18n, useScopedT } from "@/contexts/I18nContext";
 import { getAvailableLocales, getLocaleName } from "@/i18n/loader";
 import { loadUserPreferences, saveUserPreferences } from "@/lib/userPreferences";
@@ -150,6 +151,37 @@ export function LaunchWindow() {
 		initialPreferences.trayLayout,
 	);
 	const [supportsCursorModeToggle, setSupportsCursorModeToggle] = useState(false);
+	const cursorModeRequestPending = useRef(false);
+	const [requestingCursorAccess, setRequestingCursorAccess] = useState(false);
+	const toggleCursorMode = async () => {
+		if (recording || cursorModeRequestPending.current) return;
+		if (cursorCaptureMode === "editable-overlay") {
+			setCursorCaptureMode("system");
+			saveUserPreferences({ cursorCaptureMode: "system" });
+			return;
+		}
+		cursorModeRequestPending.current = true;
+		setRequestingCursorAccess(true);
+		try {
+			const platform = await window.electronAPI.getPlatform();
+			if (platform === "darwin") {
+				const access = await window.electronAPI.requestNativeMacCursorAccess({ prompt: true });
+				if (!access.success || !access.granted) {
+					toast.error(
+						"Editable cursor needs Accessibility access. The system cursor is still enabled.",
+					);
+					return;
+				}
+			}
+			setCursorCaptureMode("editable-overlay");
+			saveUserPreferences({ cursorCaptureMode: "editable-overlay" });
+		} catch {
+			toast.error("Editable cursor access is unavailable. The system cursor is still enabled.");
+		} finally {
+			cursorModeRequestPending.current = false;
+			setRequestingCursorAccess(false);
+		}
+	};
 	const languageTriggerRef = useRef<HTMLButtonElement | null>(null);
 	const languageMenuPanelRef = useRef<HTMLDivElement | null>(null);
 	const hudBarRef = useRef<HTMLDivElement | null>(null);
@@ -888,13 +920,8 @@ export function LaunchWindow() {
 									? "drop-shadow-[0_0_4px_rgba(74,222,128,0.4)]"
 									: ""
 							}`}
-							onClick={() =>
-								!recording &&
-								setCursorCaptureMode(
-									cursorCaptureMode === "editable-overlay" ? "system" : "editable-overlay",
-								)
-							}
-							disabled={recording}
+							onClick={toggleCursorMode}
+							disabled={recording || requestingCursorAccess}
 							title={
 								cursorCaptureMode === "editable-overlay"
 									? t("cursor.useSystemCursor")
@@ -920,7 +947,7 @@ export function LaunchWindow() {
 							: "bg-white/[0.06] hover:bg-white/[0.10]"
 					}`}
 					onClick={toggleRecording}
-					disabled={!hasSelectedSource && !recording}
+					disabled={requestingCursorAccess || (!hasSelectedSource && !recording)}
 					style={{ flex: "0 0 auto" }}
 				>
 					<div className={`flex items-center justify-center ${recording ? "gap-1.5" : ""}`}>

@@ -112,7 +112,9 @@ export function useScreenRecorder(
 	);
 	const [webcamEnabled, setWebcamEnabledState] = useState(false);
 	const [webcamPreviewStream, setWebcamPreviewStream] = useState<MediaStream | null>(null);
-	const [cursorCaptureMode, setCursorCaptureMode] = useState<CursorCaptureMode>("editable-overlay");
+	const [cursorCaptureMode, setCursorCaptureMode] = useState<CursorCaptureMode>(
+		initialOptions.cursorCaptureMode ?? "editable-overlay",
+	);
 	const screenRecorder = useRef<RecorderHandle | null>(null);
 	const webcamRecorder = useRef<RecorderHandle | null>(null);
 	const nativeWindowsRecording = useRef<NativeWindowsRecordingHandle | null>(null);
@@ -1135,16 +1137,22 @@ export function useScreenRecorder(
 		try {
 			const platform = await window.electronAPI.getPlatform();
 			if (platform === "darwin" && cursorCaptureMode === "editable-overlay") {
-				// The main process shows a native dialog that deep-links to the
-				// Accessibility settings pane when access is missing, so we just stop
-				// here and let the user grant it and press record again.
-				const access = await window.electronAPI.requestNativeMacCursorAccess();
-				if (!access.granted) {
+				// Record is a quiet check, never a permission request. Only the HUD's
+				// explicit editable-cursor opt-in may ask macOS for Accessibility.
+				const access = await window.electronAPI.requestNativeMacCursorAccess({ prompt: false });
+				if (!access.success || !access.granted) {
+					toast.error(
+						"Editable cursor access is unavailable. Use the system cursor, or enable editable cursor from the HUD and allow Accessibility.",
+					);
 					return;
 				}
 			}
 		} catch (error) {
 			console.warn("Failed to preflight macOS cursor accessibility before countdown:", error);
+			toast.error(
+				"Editable cursor access is unavailable. Use the system cursor, or enable editable cursor from the HUD and allow Accessibility.",
+			);
+			return;
 		}
 
 		if (!isCountdownRunActive(runId)) {

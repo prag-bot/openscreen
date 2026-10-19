@@ -55,7 +55,7 @@ interface Window {
 			status: string;
 			error?: string;
 		}>;
-		requestNativeMacCursorAccess: () => Promise<{
+		requestNativeMacCursorAccess: (options?: { prompt?: boolean }) => Promise<{
 			success: boolean;
 			granted: boolean;
 			status: string;

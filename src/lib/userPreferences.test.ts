@@ -92,6 +92,31 @@ describe("user preferences", () => {
 		localStorage.clear();
 	});
 
+	it.each([
+		null,
+		{},
+		{ padding: 12 },
+		{ cursorCaptureMode: "invalid" },
+		{ cursorCaptureMode: true },
+	])("defaults fresh, legacy and invalid cursor preferences to system (%j)", (stored) => {
+		if (stored) localStorage.setItem("openscreen_user_preferences", JSON.stringify(stored));
+		expect(loadUserPreferences().cursorCaptureMode).toBe("system");
+	});
+
+	it.each([
+		"system",
+		"editable-overlay",
+	] as const)("round-trips an explicit %s cursor choice", (cursorCaptureMode) => {
+		saveUserPreferences({ padding: 12, trayLayout: "vertical", microphoneEnabled: false });
+		saveUserPreferences({ cursorCaptureMode });
+		expect(loadUserPreferences()).toMatchObject({
+			cursorCaptureMode,
+			padding: 12,
+			trayLayout: "vertical",
+			microphoneEnabled: false,
+		});
+	});
+
 	it("persists the tray layout preference", () => {
 		saveUserPreferences({ trayLayout: "vertical" });
 

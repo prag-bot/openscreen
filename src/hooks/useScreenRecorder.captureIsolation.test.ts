@@ -36,6 +36,7 @@ const api = {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	api.requestNativeMacCursorAccess.mockReset().mockResolvedValue({ success: true, granted: true });
 	vi.useFakeTimers();
 	vi.setSystemTime(20_000);
 	api.startNativeMacRecording.mockImplementation(async () => ({
@@ -71,6 +72,22 @@ async function recordAfterCountdown(toggle: () => void) {
 }
 
 describe("macOS capture isolation routing", () => {
+	it.each([
+		"denied",
+		"error",
+	])("quietly aborts editable Record on cursor access %s, without countdown or media capture", async (outcome) => {
+		if (outcome === "denied")
+			api.requestNativeMacCursorAccess.mockResolvedValueOnce({ success: true, granted: false });
+		else api.requestNativeMacCursorAccess.mockRejectedValueOnce(new Error("unavailable"));
+		const { result } = renderHook(() => useScreenRecorder());
+		await recordAfterCountdown(() => result.current.toggleRecording());
+		expect(api.requestNativeMacCursorAccess).toHaveBeenCalledExactlyOnceWith({ prompt: false });
+		expect(result.current.recording).toBe(false);
+		expect(api.showCountdownOverlay).not.toHaveBeenCalled();
+		expect(api.startNativeMacRecording).not.toHaveBeenCalled();
+		expect(getUserMedia).not.toHaveBeenCalled();
+		expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/system cursor/i));
+	});
 	it("retains requested microphone intent and aborts when native microphone capture fails", async () => {
 		api.startNativeMacRecording.mockResolvedValueOnce({
 			success: false,

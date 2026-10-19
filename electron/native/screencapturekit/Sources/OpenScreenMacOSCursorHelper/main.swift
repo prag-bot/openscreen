@@ -5,6 +5,8 @@ import Foundation
 
 struct CursorHelperRequest: Decodable {
 	let sampleIntervalMs: Int?
+	let promptAccessibility: Bool?
+	let accessibilityProbeOnly: Bool?
 }
 
 struct CapturedCursorAsset {
@@ -286,7 +288,8 @@ func leftButtonDown() -> Bool {
 	CGEventSource.buttonState(.hidSystemState, button: .left)
 }
 
-func requestAccessibilityTrust() -> Bool {
+func requestAccessibilityTrust(prompt: Bool) -> Bool {
+	guard prompt else { return AXIsProcessTrusted() }
 	let options = [
 		kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
 	] as CFDictionary
@@ -300,19 +303,22 @@ if CommandLine.arguments.count >= 2,
 {
 	request = decoded
 } else {
-	request = CursorHelperRequest(sampleIntervalMs: nil)
+	request = CursorHelperRequest(sampleIntervalMs: nil, promptAccessibility: nil, accessibilityProbeOnly: nil)
 }
 
 let intervalMs = max(8, request.sampleIntervalMs ?? 33)
-let accessibilityTrusted = requestAccessibilityTrust()
+let accessibilityTrusted = requestAccessibilityTrust(prompt: request.promptAccessibility == true)
 let mouseTracker = MouseButtonTracker()
-let mouseTapReady = mouseTracker.start()
+// Probes never create event taps. Untrusted recording starts must not trigger
+// Input Monitoring or continue sampling under an unavailable editable cursor.
+let mouseTapReady = accessibilityTrusted && request.accessibilityProbeOnly != true && mouseTracker.start()
 emit([
 	"type": "ready",
 	"timestampMs": timestampMs(),
 	"accessibilityTrusted": accessibilityTrusted,
 	"mouseTapReady": mouseTapReady,
 ])
+if request.accessibilityProbeOnly == true || !accessibilityTrusted { exit(0) }
 
 // Process-wide set so each unique cursor shape is serialised at most once,
 // even if the user alternates between shapes (e.g. arrow → text → arrow).

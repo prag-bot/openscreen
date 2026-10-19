@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { type ReactNode, StrictMode } from "react";
+import { toast } from "sonner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRecorderHandle } from "@/hooks/recorderHandle";
 import { requestCameraAccess } from "@/lib/requestCameraAccess";
@@ -62,6 +63,8 @@ function cameraStream() {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	api.getPlatform.mockResolvedValue("darwin");
+	api.requestNativeMacCursorAccess.mockReset().mockResolvedValue({ success: true, granted: true });
 	microphones.devices = [];
 	microphones.selectedDeviceId = "default";
 	const store = new Map<string, string>();
@@ -118,6 +121,105 @@ function expectControls(enabled: boolean) {
 }
 
 describe("HUD recording preferences", () => {
+	it.each([
+		null,
+		{},
+		{ cursorCaptureMode: "wrong" },
+	])("uses system cursor quietly on production HUD mount and Record (%j)", async (stored) => {
+		if (stored) localStorage.setItem("openscreen_user_preferences", JSON.stringify(stored));
+		render(<LaunchWindow />);
+		await waitFor(() =>
+			expect(screen.getByTestId("launch-cursor-mode-button").title).toBe(
+				"cursor.useEditableCursor",
+			),
+		);
+		await waitFor(() => expect(getUserMedia).toHaveBeenCalledTimes(1));
+		expect(api.requestNativeMacCursorAccess).not.toHaveBeenCalled();
+		vi.useFakeTimers();
+		await act(async () => fireEvent.click(screen.getByTestId("launch-record-button")));
+		await act(async () => {
+			await vi.advanceTimersByTimeAsync(3000);
+		});
+		expect(api.requestNativeMacCursorAccess).not.toHaveBeenCalled();
+		expect(api.startNativeMacRecording).toHaveBeenCalledWith(
+			expect.objectContaining({
+				cursor: { mode: "system" },
+				video: expect.objectContaining({ hideSystemCursor: false }),
+			}),
+		);
+	});
+
+	it("requests editable cursor only on explicit opt-in, deduplicates clicks, and restores successful choices quietly", async () => {
+		let grant!: (value: { success: boolean; granted: boolean }) => void;
+		api.requestNativeMacCursorAccess.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					grant = resolve;
+				}),
+		);
+		const first = render(<LaunchWindow />);
+		const button = await screen.findByTestId("launch-cursor-mode-button");
+		expect(api.requestNativeMacCursorAccess).not.toHaveBeenCalled();
+		await act(async () => {
+			fireEvent.click(button);
+			fireEvent.click(button);
+		});
+		expect(api.requestNativeMacCursorAccess).toHaveBeenCalledExactlyOnceWith({ prompt: true });
+		expect(loadUserPreferences().cursorCaptureMode).toBe("system");
+		await act(async () => grant({ success: true, granted: true }));
+		expect(button.title).toBe("cursor.useSystemCursor");
+		expect(loadUserPreferences().cursorCaptureMode).toBe("editable-overlay");
+		first.unmount();
+		render(<LaunchWindow />);
+		const restored = await screen.findByTestId("launch-cursor-mode-button");
+		expect(restored.title).toBe("cursor.useSystemCursor");
+		expect(api.requestNativeMacCursorAccess).toHaveBeenCalledTimes(1);
+		fireEvent.click(restored);
+		expect(loadUserPreferences().cursorCaptureMode).toBe("system");
+		expect(api.requestNativeMacCursorAccess).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([
+		"denied",
+		"error",
+	])("keeps the system cursor and preference after opt-in %s", async (outcome) => {
+		if (outcome === "denied")
+			api.requestNativeMacCursorAccess.mockResolvedValueOnce({ success: true, granted: false });
+		else api.requestNativeMacCursorAccess.mockRejectedValueOnce(new Error("unavailable"));
+		render(<LaunchWindow />);
+		const button = await screen.findByTestId("launch-cursor-mode-button");
+		await act(async () => fireEvent.click(button));
+		expect(button.title).toBe("cursor.useEditableCursor");
+		expect(loadUserPreferences().cursorCaptureMode).toBe("system");
+		expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/system cursor/i));
+	});
+
+	it("enables supported non-macOS cursor mode without requesting macOS access", async () => {
+		api.getPlatform.mockResolvedValue("win32");
+		render(<LaunchWindow />);
+		const button = await screen.findByTestId("launch-cursor-mode-button");
+		await act(async () => fireEvent.click(button));
+		expect(button.title).toBe("cursor.useSystemCursor");
+		expect(loadUserPreferences().cursorCaptureMode).toBe("editable-overlay");
+		expect(api.requestNativeMacCursorAccess).not.toHaveBeenCalled();
+	});
+
+	it("quietly refuses a previously opted-in editable Record when access is now denied", async () => {
+		saveUserPreferences({ cursorCaptureMode: "editable-overlay", webcamEnabled: false });
+		api.requestNativeMacCursorAccess.mockResolvedValueOnce({ success: true, granted: false });
+		render(<LaunchWindow />);
+		await waitFor(() =>
+			expect(screen.getByTestId("launch-cursor-mode-button").title).toBe("cursor.useSystemCursor"),
+		);
+		expect(api.requestNativeMacCursorAccess).not.toHaveBeenCalled();
+		await act(async () => fireEvent.click(screen.getByTestId("launch-record-button")));
+		expect(api.requestNativeMacCursorAccess).toHaveBeenCalledExactlyOnceWith({ prompt: false });
+		expect(api.showCountdownOverlay).not.toHaveBeenCalled();
+		expect(api.startNativeMacRecording).not.toHaveBeenCalled();
+		expect(getUserMedia).not.toHaveBeenCalled();
+		expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/system cursor/i));
+	});
+
 	it("arms all inputs, obtains one real camera preview, and never records on mount", async () => {
 		const previewStream = cameraStream();
 		getUserMedia.mockResolvedValue(previewStream);
