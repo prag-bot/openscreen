@@ -38,6 +38,7 @@
 		"cameraBlocked": "Camera access is blocked. Enable it in system settings to use the webcam.",
 		"systemAudioUnavailable": "System audio not available. Recording without system audio.",
 		"microphoneDenied": "Microphone access denied. Recording will continue without audio.",
+		"microphoneRequired": "Recording did not start because the microphone could not be captured. Allow microphone access and check the selected device, then retry. To record without narration, switch the microphone off explicitly.",
 		"cameraDenied": "Camera access denied. Recording will continue without webcam.",
 		"cameraDisconnected": "Webcam disconnected.",
 		"cameraNotFound": "Camera not found.",

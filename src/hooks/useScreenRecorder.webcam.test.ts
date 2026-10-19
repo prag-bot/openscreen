@@ -1,4 +1,5 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import { createElement, type ReactNode, StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { requestCameraAccess } from "@/lib/requestCameraAccess";
 import { useScreenRecorder } from "./useScreenRecorder";
@@ -23,6 +24,8 @@ function cameraStream() {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	getUserMedia.mockReset();
+	vi.mocked(requestCameraAccess).mockReset();
 	vi.mocked(requestCameraAccess).mockResolvedValue({
 		success: true,
 		granted: true,
@@ -37,6 +40,44 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("recorder webcam preview stream", () => {
+	it("initializes an armed camera through one permission check and preview acquisition in StrictMode", async () => {
+		const { stream, track } = cameraStream();
+		getUserMedia.mockResolvedValue(stream);
+		const { result, rerender } = renderHook(() => useScreenRecorder({ webcamEnabled: true }), {
+			wrapper: ({ children }: { children: ReactNode }) => createElement(StrictMode, null, children),
+		});
+		await waitFor(() => expect(result.current.webcamPreviewStream).toBe(stream));
+		expect(requestCameraAccess).toHaveBeenCalledTimes(1);
+		expect(getUserMedia).toHaveBeenCalledTimes(1);
+		await act(async () => {
+			await result.current.setWebcamEnabled(false);
+		});
+		rerender();
+		expect(result.current.webcamEnabled).toBe(false);
+		expect(result.current.webcamPreviewStream).toBeNull();
+		expect(track.stop).toHaveBeenCalledTimes(1);
+		expect(getUserMedia).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not re-enable the startup camera if it is switched off while permission is pending", async () => {
+		let grantAccess: (value: Awaited<ReturnType<typeof requestCameraAccess>>) => void = vi.fn();
+		vi.mocked(requestCameraAccess).mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					grantAccess = resolve;
+				}),
+		);
+		const { result } = renderHook(() => useScreenRecorder({ webcamEnabled: true }));
+		expect(requestCameraAccess).toHaveBeenCalledTimes(1);
+		await act(async () => {
+			await result.current.setWebcamEnabled(false);
+			grantAccess({ success: true, granted: true, status: "granted" });
+		});
+		expect(result.current.webcamEnabled).toBe(false);
+		expect(result.current.webcamPreviewStream).toBeNull();
+		expect(getUserMedia).not.toHaveBeenCalled();
+	});
+
 	it("exposes the existing camera stream and releases it on disable", async () => {
 		const { stream, track } = cameraStream();
 		getUserMedia.mockResolvedValue(stream);

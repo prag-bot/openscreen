@@ -103,4 +103,46 @@ describe("user preferences", () => {
 
 		expect(loadUserPreferences().trayLayout).toBe("horizontal");
 	});
+
+	it.each([
+		null,
+		{},
+		{ padding: 12, trayLayout: "vertical" },
+	])("arms microphone, system audio and camera for fresh or legacy preferences (%j)", (stored) => {
+		if (stored) localStorage.setItem("openscreen_user_preferences", JSON.stringify(stored));
+		expect(loadUserPreferences()).toMatchObject({
+			microphoneEnabled: true,
+			systemAudioEnabled: true,
+			webcamEnabled: true,
+		});
+	});
+
+	it("round-trips explicit recording off choices without losing other preferences", () => {
+		saveUserPreferences({ trayLayout: "vertical" });
+		saveUserPreferences({
+			microphoneEnabled: false,
+			systemAudioEnabled: false,
+			webcamEnabled: false,
+		});
+		expect(loadUserPreferences()).toMatchObject({
+			trayLayout: "vertical",
+			microphoneEnabled: false,
+			systemAudioEnabled: false,
+			webcamEnabled: false,
+		});
+	});
+
+	it.each(
+		[null, "false", 0, {}, []].map((value) => ({ value })),
+	)("defaults invalid recording values to enabled (%j)", ({ value }) => {
+		localStorage.setItem(
+			"openscreen_user_preferences",
+			JSON.stringify({ microphoneEnabled: value, systemAudioEnabled: value, webcamEnabled: value }),
+		);
+		expect(loadUserPreferences()).toMatchObject({
+			microphoneEnabled: true,
+			systemAudioEnabled: true,
+			webcamEnabled: true,
+		});
+	});
 });

@@ -77,6 +77,61 @@ struct RecordingRequest: Decodable {
 	let captureExclusion: CaptureExclusion
 }
 
+// BEGIN PURE MICROPHONE IDENTITY
+struct MicrophoneDeviceIdentity {
+	let uniqueID: String
+	let localizedName: String
+}
+
+enum MicrophoneIdentityResolver {
+	// Chromium's macOS GetDeviceLabel appends these exact transport labels.
+	// Source: Chromium 146.0.7680.188, media/audio/mac/core_audio_util_mac.cc.
+	// USB instead uses the model's lowercase hexadecimal VID:PID, when present.
+	// Keep this bounded: unfamiliar labels must fail rather than select a different mic.
+	private static let chromiumTransportSuffixes = [
+		"Built-in", "Aggregate", "AutoAggregate", "Virtual", "PCI", "FireWire",
+		"Bluetooth", "Bluetooth LE", "HDMI", "DisplayPort", "AirPlay", "AVB", "Thunderbolt",
+	]
+
+	static func resolve(
+		deviceId: String?,
+		deviceName: String?,
+		devices: [MicrophoneDeviceIdentity],
+		defaultDeviceId: String?
+	) -> String? {
+		let id = deviceId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+		let name = deviceName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+		// The browser's default label is presentation-only (often "Default - ...").
+		if id == "default" || (id.isEmpty && name.isEmpty) {
+			return defaultDeviceId
+		}
+
+		// Native UIDs are authoritative, including when a label is stale or duplicated.
+		if let device = devices.first(where: { $0.uniqueID == id }) {
+			return device.uniqueID
+		}
+		guard !name.isEmpty else { return nil }
+
+		// An exact native name can also be another device's Chromium alias.
+		// Consider both tiers together; only a real UID can disambiguate them.
+		let matches = devices.filter { device in
+			if device.localizedName == name {
+				return true
+			}
+			if chromiumTransportSuffixes.contains(where: { name == "\(device.localizedName) (\($0))" }) {
+				return true
+			}
+			let escapedName = NSRegularExpression.escapedPattern(for: device.localizedName)
+			let usbAlias = "^\(escapedName) \\([0-9a-f]{4}:[0-9a-f]{4}\\)$"
+			return name.range(of: usbAlias, options: .regularExpression) != nil
+		}
+		let matchingIDs = Set(matches.map { $0.uniqueID })
+		return matchingIDs.count == 1 ? matchingIDs.first : nil
+	}
+}
+// END PURE MICROPHONE IDENTITY
+
 enum HelperError: Error, CustomStringConvertible {
 	case invalidArguments
 	case unsupportedMacOS
@@ -169,7 +224,7 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		let target = try makeCaptureTarget(from: content)
 		outputWidth = target.width
 		outputHeight = target.height
-		let configuration = makeStreamConfiguration()
+		let configuration = try makeStreamConfiguration()
 		let stream = SCStream(filter: target.filter, configuration: configuration, delegate: self)
 
 		try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
@@ -415,7 +470,7 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 		}
 	}
 
-	private func makeStreamConfiguration() -> SCStreamConfiguration {
+	private func makeStreamConfiguration() throws -> SCStreamConfiguration {
 		let configuration = SCStreamConfiguration()
 		configuration.width = outputWidth
 		configuration.height = outputHeight
@@ -430,20 +485,19 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 
 		if request.audio.microphone.enabled {
 			guard supportsNativeMicrophoneCapture(streamConfig: configuration) else {
-				nativeMicrophoneEnabled = false
-				emit([
-					"event": "warning",
-					"code": "microphone-unavailable",
-					"message": "Native microphone capture requires ScreenCaptureKit microphone support on this macOS version.",
-				])
-				return configuration
+				throw HelperError.unsupportedFeature(
+					"Recording did not start: microphone capture is not supported on this macOS version. Update macOS, or switch the microphone off explicitly to record without narration."
+				)
+			}
+			guard let deviceId = resolveMicrophoneCaptureDeviceID() else {
+				throw HelperError.sourceNotFound(
+					"Recording did not start: the selected microphone is unavailable. Reconnect or select a microphone and retry, or switch the microphone off explicitly to record without narration."
+				)
 			}
 			nativeMicrophoneEnabled = true
 			configuration.capturesAudio = true
 			configuration.setValue(true, forKey: "captureMicrophone")
-			if let deviceId = resolveMicrophoneCaptureDeviceID() {
-				configuration.setValue(deviceId, forKey: "microphoneCaptureDeviceID")
-			}
+			configuration.setValue(deviceId, forKey: "microphoneCaptureDeviceID")
 		} else {
 			nativeMicrophoneEnabled = false
 		}
@@ -646,23 +700,14 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 	}
 
 	private func resolveMicrophoneCaptureDeviceID() -> String? {
-		let devices = AVCaptureDevice.devices(for: .audio)
-
-		if let deviceName = request.audio.microphone.deviceName?.trimmingCharacters(in: .whitespacesAndNewlines),
-			!deviceName.isEmpty,
-			let device = devices.first(where: { $0.localizedName == deviceName })
-		{
-			return device.uniqueID
-		}
-
-		if let deviceId = request.audio.microphone.deviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
-			!deviceId.isEmpty,
-			devices.contains(where: { $0.uniqueID == deviceId })
-		{
-			return deviceId
-		}
-
-		return nil
+		MicrophoneIdentityResolver.resolve(
+			deviceId: request.audio.microphone.deviceId,
+			deviceName: request.audio.microphone.deviceName,
+			devices: AVCaptureDevice.devices(for: .audio).map {
+				MicrophoneDeviceIdentity(uniqueID: $0.uniqueID, localizedName: $0.localizedName)
+			},
+			defaultDeviceId: AVCaptureDevice.default(for: .audio)?.uniqueID
+		)
 	}
 }
 

@@ -7,3 +7,4 @@
 - When available, run `/usr/bin/python3 "$HOME/.codex/worktree-env/bootstrap.py" --cwd <checkout>` before app commands and worktree lifecycle actions. Read its JSON status only. Environment files stay local and ignored; do not overwrite existing files or share credentials between repos.
 - Keep original screen, camera and audio footage intact. AI edits must be validated, reviewable, undoable removal ranges, shared by the editor and HyperFrames export.
 - Reuse the installed Codex CLI login/configuration for optional transcript-based editing; never extract or copy account tokens. Keep transcript processing and quota disclosure explicit.
+- The canonical local app is the Projects copy. Ad-hoc rebuilds change its permission identity: stage and verify updates first, retain the working build, and coordinate app-specific reauthorization before replacing it. Never globally reset privacy permissions or weaken signing requirements to bypass a denial.

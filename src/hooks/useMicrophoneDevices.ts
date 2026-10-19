@@ -18,14 +18,23 @@ export function useMicrophoneDevices(enabled: boolean = true) {
 		}
 
 		let mounted = true;
+		const permissionStreams = new Set<MediaStream>();
+		const releasePermissionStream = (stream: MediaStream) => {
+			if (permissionStreams.delete(stream)) {
+				stream.getTracks().forEach((track) => track.stop());
+			}
+		};
 
 		const loadDevices = async () => {
+			let permissionStream: MediaStream | null = null;
 			try {
 				setIsLoading(true);
 				setError(null);
 
 				// Request permission first to get actual device labels
-				const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+				permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+				permissionStreams.add(permissionStream);
+				if (!mounted) return;
 
 				const allDevices = await navigator.mediaDevices.enumerateDevices();
 				const audioInputs = allDevices
@@ -35,9 +44,6 @@ export function useMicrophoneDevices(enabled: boolean = true) {
 						label: device.label || `Microphone ${device.deviceId.slice(0, 8)}`,
 						groupId: device.groupId,
 					}));
-
-				// Stop the permission stream
-				stream.getTracks().forEach((track) => track.stop());
 
 				if (mounted) {
 					setDevices(audioInputs);
@@ -54,6 +60,8 @@ export function useMicrophoneDevices(enabled: boolean = true) {
 					setIsLoading(false);
 					console.error("Error loading microphone devices:", err);
 				}
+			} finally {
+				if (permissionStream) releasePermissionStream(permissionStream);
 			}
 		};
 
@@ -67,6 +75,7 @@ export function useMicrophoneDevices(enabled: boolean = true) {
 
 		return () => {
 			mounted = false;
+			permissionStreams.forEach(releasePermissionStream);
 			navigator.mediaDevices.removeEventListener("devicechange", handleDeviceChange);
 		};
 	}, [enabled, selectedDeviceId]);

@@ -71,6 +71,33 @@ async function recordAfterCountdown(toggle: () => void) {
 }
 
 describe("macOS capture isolation routing", () => {
+	it("retains requested microphone intent and aborts when native microphone capture fails", async () => {
+		api.startNativeMacRecording.mockResolvedValueOnce({
+			success: false,
+			error: "Microphone permission is required for native microphone capture.",
+		} as never);
+		const { result } = renderHook(() =>
+			useScreenRecorder({ microphoneEnabled: true, systemAudioEnabled: true }),
+		);
+		await recordAfterCountdown(() => result.current.toggleRecording());
+		expect(api.startNativeMacRecording).toHaveBeenCalledWith(
+			expect.objectContaining({
+				audio: {
+					system: { enabled: true },
+					microphone: expect.objectContaining({ enabled: true }),
+				},
+			}),
+		);
+		expect(result.current.recording).toBe(false);
+		expect(result.current.microphoneEnabled).toBe(true);
+		expect(getUserMedia).not.toHaveBeenCalled();
+		expect(getDisplayMedia).not.toHaveBeenCalled();
+		expect(api.switchToEditor).not.toHaveBeenCalled();
+		expect(toast.error).toHaveBeenCalledWith(
+			"Microphone permission is required for native microphone capture.",
+		);
+	});
+
 	it("records exactly one editable camera sidecar while keeping its live preview attached", async () => {
 		const cameraTrack = { stop: vi.fn(), onended: null };
 		const cameraStream = {

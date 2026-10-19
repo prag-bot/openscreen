@@ -106,6 +106,7 @@ export function LaunchWindow() {
 	} = useI18n();
 	const suggestedLanguageName = systemLocaleSuggestion ? getLocaleName(systemLocaleSuggestion) : "";
 	const activeLanguageLabel = getLocaleName(locale).split(/\s+/)[0] || locale.toUpperCase();
+	const [initialPreferences] = useState(loadUserPreferences);
 
 	const {
 		recording,
@@ -131,7 +132,7 @@ export function LaunchWindow() {
 		setWebcamDeviceName,
 		cursorCaptureMode,
 		setCursorCaptureMode,
-	} = useScreenRecorder();
+	} = useScreenRecorder(initialPreferences);
 
 	const showMicControls = microphoneEnabled && !recording;
 	const showWebcamControls = webcamEnabled && !recording;
@@ -146,7 +147,7 @@ export function LaunchWindow() {
 	const webcamExpanded = isWebcamHovered || isWebcamFocused;
 	const [isLanguageMenuOpen, setIsLanguageMenuOpen] = useState(false);
 	const [trayLayout, setTrayLayout] = useState<"horizontal" | "vertical">(
-		() => loadUserPreferences().trayLayout,
+		initialPreferences.trayLayout,
 	);
 	const [supportsCursorModeToggle, setSupportsCursorModeToggle] = useState(false);
 	const languageTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -210,10 +211,11 @@ export function LaunchWindow() {
 
 	useEffect(() => {
 		if (selectedCameraId) {
-			setWebcamDeviceId(selectedCameraId);
+			// Enumeration's default selection must not replace the existing preview
+			// stream. Explicit selector changes below apply the chosen device.
 			setWebcamDeviceName(cameraDevices.find((d) => d.deviceId === selectedCameraId)?.label);
 		}
-	}, [selectedCameraId, cameraDevices, setWebcamDeviceId, setWebcamDeviceName]);
+	}, [selectedCameraId, cameraDevices, setWebcamDeviceName]);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -499,6 +501,7 @@ export function LaunchWindow() {
 	const toggleMicrophone = () => {
 		if (!recording) {
 			setMicrophoneEnabled(!microphoneEnabled);
+			saveUserPreferences({ microphoneEnabled: !microphoneEnabled });
 		}
 	};
 	const dragLastPositionRef = useRef<{ x: number; y: number } | null>(null);
@@ -834,7 +837,11 @@ export function LaunchWindow() {
 					<button
 						data-testid="launch-system-audio-button"
 						className={`${hudIconBtnClasses} ${systemAudioEnabled ? "drop-shadow-[0_0_4px_rgba(74,222,128,0.4)]" : ""}`}
-						onClick={() => !recording && setSystemAudioEnabled(!systemAudioEnabled)}
+						onClick={() => {
+							if (recording) return;
+							setSystemAudioEnabled(!systemAudioEnabled);
+							saveUserPreferences({ systemAudioEnabled: !systemAudioEnabled });
+						}}
 						disabled={recording}
 						title={
 							systemAudioEnabled ? t("audio.disableSystemAudio") : t("audio.enableSystemAudio")
@@ -862,7 +869,9 @@ export function LaunchWindow() {
 						data-testid="launch-webcam-button"
 						className={`${hudIconBtnClasses} ${webcamEnabled ? "drop-shadow-[0_0_4px_rgba(74,222,128,0.4)]" : ""}`}
 						onClick={async () => {
-							await setWebcamEnabled(!webcamEnabled);
+							const enabled = !webcamEnabled;
+							saveUserPreferences({ webcamEnabled: enabled });
+							await setWebcamEnabled(enabled);
 						}}
 						disabled={recording}
 						title={webcamEnabled ? t("webcam.disableWebcam") : t("webcam.enableWebcam")}

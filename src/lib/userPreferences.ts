@@ -18,7 +18,16 @@ const VALID_ASPECT_RATIOS: readonly string[] = [
 	"native",
 ];
 
-export interface UserPreferences {
+export interface RecordingPreferences {
+	/** Capture narration unless the user explicitly switches the microphone off. */
+	microphoneEnabled: boolean;
+	/** Capture system playback unless the user explicitly switches it off. */
+	systemAudioEnabled: boolean;
+	/** Arm the live camera preview and camera sidecar for new recordings. */
+	webcamEnabled: boolean;
+}
+
+export interface UserPreferences extends RecordingPreferences {
 	/** Default padding % */
 	padding: number;
 	/** Default aspect ratio */
@@ -43,6 +52,9 @@ export const DEFAULT_PREFS: UserPreferences = {
 	exportFolder: null,
 	projectFolder: null,
 	trayLayout: "horizontal",
+	microphoneEnabled: true,
+	systemAudioEnabled: true,
+	webcamEnabled: true,
 };
 
 /** Parses stored preferences without throwing on malformed JSON. */
@@ -99,6 +111,16 @@ export function loadUserPreferences(): UserPreferences {
 			raw.trayLayout === "horizontal" || raw.trayLayout === "vertical"
 				? raw.trayLayout
 				: DEFAULT_PREFS.trayLayout,
+		microphoneEnabled:
+			typeof raw.microphoneEnabled === "boolean"
+				? raw.microphoneEnabled
+				: DEFAULT_PREFS.microphoneEnabled,
+		systemAudioEnabled:
+			typeof raw.systemAudioEnabled === "boolean"
+				? raw.systemAudioEnabled
+				: DEFAULT_PREFS.systemAudioEnabled,
+		webcamEnabled:
+			typeof raw.webcamEnabled === "boolean" ? raw.webcamEnabled : DEFAULT_PREFS.webcamEnabled,
 	};
 }
 

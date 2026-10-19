@@ -15,6 +15,7 @@ import {
 } from "@/lib/nativeWindowsRecording";
 import type { CursorCaptureMode, RecordedVideoAssetInput } from "@/lib/recordingSession";
 import { requestCameraAccess } from "@/lib/requestCameraAccess";
+import type { RecordingPreferences } from "@/lib/userPreferences";
 import { createRecorderHandle, type RecorderHandle } from "./recorderHandle";
 
 const TARGET_FRAME_RATE = 60;
@@ -91,17 +92,24 @@ type NativeMacRecordingHandle = {
 	webcamOffsetSeconds: number;
 };
 
-export function useScreenRecorder(): UseScreenRecorderReturn {
+/** The HUD supplies persisted defaults; other capture clients can explicitly opt into inputs. */
+export function useScreenRecorder(
+	initialOptions: Partial<RecordingPreferences> = {},
+): UseScreenRecorderReturn {
 	const t = useScopedT("editor");
 	const [recording, setRecording] = useState(false);
 	const [paused, setPaused] = useState(false);
 	const [elapsedSeconds, setElapsedSeconds] = useState(0);
-	const [microphoneEnabled, setMicrophoneEnabled] = useState(false);
+	const [microphoneEnabled, setMicrophoneEnabled] = useState(
+		initialOptions.microphoneEnabled ?? false,
+	);
 	const [microphoneDeviceId, setMicrophoneDeviceId] = useState<string | undefined>(undefined);
 	const [microphoneDeviceName, setMicrophoneDeviceName] = useState<string | undefined>(undefined);
 	const [webcamDeviceId, setWebcamDeviceId] = useState<string | undefined>(undefined);
 	const [webcamDeviceName, setWebcamDeviceName] = useState<string | undefined>(undefined);
-	const [systemAudioEnabled, setSystemAudioEnabled] = useState(false);
+	const [systemAudioEnabled, setSystemAudioEnabled] = useState(
+		initialOptions.systemAudioEnabled ?? false,
+	);
 	const [webcamEnabled, setWebcamEnabledState] = useState(false);
 	const [webcamPreviewStream, setWebcamPreviewStream] = useState<MediaStream | null>(null);
 	const [cursorCaptureMode, setCursorCaptureMode] = useState<CursorCaptureMode>("editable-overlay");
@@ -125,6 +133,9 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 	const [countdownActive, setCountdownActive] = useState(false);
 	const webcamReady = useRef(false);
 	const webcamAcquireId = useRef(0);
+	const initialWebcamPending = useRef(initialOptions.webcamEnabled ?? false);
+	const webcamEnableRequestId = useRef(0);
+	const cameraAccessPromise = useRef<Promise<boolean> | null>(null);
 	const canPauseRecording =
 		recording &&
 		Boolean(
@@ -206,29 +217,58 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 		webcamReady.current = true;
 	}, []);
 
+	const getCameraAccess = useCallback(() => {
+		// Share in-flight permission checks, including React StrictMode's effect replay.
+		if (!cameraAccessPromise.current) {
+			cameraAccessPromise.current = (async () => {
+				const accessResult = await requestCameraAccess();
+				if (!accessResult.success) {
+					toast.error(t("recording.failedCameraAccess"));
+					return false;
+				}
+				if (!accessResult.granted) {
+					toast.error(t("recording.cameraBlocked"));
+					return false;
+				}
+				return true;
+			})().finally(() => {
+				cameraAccessPromise.current = null;
+			});
+		}
+		return cameraAccessPromise.current;
+	}, [t]);
+
 	const setWebcamEnabled = useCallback(
 		async (enabled: boolean) => {
+			initialWebcamPending.current = false;
+			const requestId = ++webcamEnableRequestId.current;
 			if (!enabled) {
 				setWebcamEnabledState(false);
 				return true;
 			}
-
-			const accessResult = await requestCameraAccess();
-			if (!accessResult.success) {
-				toast.error(t("recording.failedCameraAccess"));
-				return false;
-			}
-
-			if (!accessResult.granted) {
-				toast.error(t("recording.cameraBlocked"));
-				return false;
-			}
-
+			const granted = await getCameraAccess();
+			if (!granted || requestId !== webcamEnableRequestId.current) return false;
 			setWebcamEnabledState(true);
 			return true;
 		},
-		[t],
+		[getCameraAccess],
 	);
+
+	useEffect(() => {
+		let cancelled = false;
+		const requestId = webcamEnableRequestId.current;
+		if (initialWebcamPending.current) {
+			void getCameraAccess().then((granted) => {
+				if (cancelled || requestId !== webcamEnableRequestId.current) return;
+				initialWebcamPending.current = false;
+				if (granted) setWebcamEnabledState(true);
+			});
+		}
+		return () => {
+			cancelled = true;
+			webcamEnableRequestId.current++;
+		};
+	}, [getCameraAccess]);
 
 	useEffect(() => {
 		if (!webcamEnabled) return;
@@ -1259,8 +1299,10 @@ export function useScreenRecorder(): UseScreenRecorderReturn {
 					});
 				} catch (audioError) {
 					console.warn("Failed to get microphone access:", audioError);
-					toast.error(t("recording.microphoneDenied"));
-					setMicrophoneEnabled(false);
+					throw new Error(t("recording.microphoneRequired"));
+				}
+				if (!microphoneStream.current.getAudioTracks().length) {
+					throw new Error(t("recording.microphoneRequired"));
 				}
 			}
 
