@@ -101,4 +101,31 @@ describe("explicit HyperFrames project versus video IPC", () => {
 		});
 		expect(result.videoPath).toBeUndefined();
 	});
+	it("never acknowledges cancellation after the renderer enters its publication commit", async () => {
+		mocks.render.mockImplementationOnce(
+			async (options: { onPublicationCommit: () => void; signal: AbortSignal }) => {
+				options.onPublicationCommit();
+				expect(await mocks.handlers.get("cancel-hyperframes-export")!(event)).toMatchObject({
+					success: false,
+				});
+				expect(options.signal.aborted).toBe(false);
+				return { videoPath: "/downloads/new-project/edited.mp4" };
+			},
+		);
+		await expect(
+			mocks.handlers.get("export-hyperframes-video")!(event, hyperframesRequest),
+		).resolves.toMatchObject({ success: true, videoPath: "/downloads/new-project/edited.mp4" });
+	});
+	it("acknowledges precommit cancellation only when the render will not publish a video", async () => {
+		mocks.render.mockImplementationOnce(async (options: { signal: AbortSignal }) => {
+			expect(await mocks.handlers.get("cancel-hyperframes-export")!(event)).toMatchObject({
+				success: true,
+			});
+			expect(options.signal.aborted).toBe(true);
+			throw new Error("HyperFrames export canceled; editable project retained");
+		});
+		const result = await mocks.handlers.get("export-hyperframes-video")!(event, hyperframesRequest);
+		expect(result).toMatchObject({ success: false, canceled: true });
+		expect(result.videoPath).toBeUndefined();
+	});
 });

@@ -9,16 +9,18 @@ export function registerHyperframesExportHandler(options: {
 	getMainWindow: () => BrowserWindow | null;
 	resolveApprovedMediaPath: (filePath: string) => Promise<string | null>;
 }): void {
-	let active: { senderId: number; controller: AbortController } | null = null;
+	let active: { senderId: number; controller: AbortController; cancelable: boolean } | null = null;
 	async function exportProject(event: IpcMainInvokeEvent, payload: unknown, renderVideo: boolean) {
 		if (active)
 			return {
 				success: false,
 				error: "A HyperFrames export is already running. Wait for it to finish or cancel it.",
 			};
-		const job = { senderId: event.sender.id, controller: new AbortController() };
+		const job = { senderId: event.sender.id, controller: new AbortController(), cancelable: true };
 		active = job;
-		const cancelOnClose = () => job.controller.abort();
+		const cancelOnClose = () => {
+			if (job.cancelable) job.controller.abort();
+		};
 		event.sender.once?.("destroyed", cancelOnClose);
 		let projectPath: string | undefined;
 		try {
@@ -57,13 +59,19 @@ export function registerHyperframesExportHandler(options: {
 			projectPath = result.path;
 			if (job.controller.signal.aborted)
 				throw new Error("HyperFrames export canceled; editable project retained");
-			if (!renderVideo) return { success: true, ...result };
+			if (!renderVideo) {
+				job.cancelable = false;
+				return { success: true, ...result };
+			}
 			const rendered = await renderHyperframesVideo({
 				projectDirectory: result.path,
 				executable,
 				expectedAudio: result.audioTrackCount > 0,
 				signal: job.controller.signal,
 				onProgress: progress,
+				onPublicationCommit: () => {
+					job.cancelable = false;
+				},
 			});
 			return {
 				success: true,
@@ -99,7 +107,8 @@ export function registerHyperframesExportHandler(options: {
 		exportProject(event, payload, true),
 	);
 	ipcMain.handle("cancel-hyperframes-export", (event) => {
-		if (!active || active.senderId !== event.sender.id) return { success: false };
+		if (!active || active.senderId !== event.sender.id || !active.cancelable)
+			return { success: false };
 		active.controller.abort();
 		return { success: true };
 	});

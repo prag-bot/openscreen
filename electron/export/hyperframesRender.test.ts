@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -167,6 +167,124 @@ describe("installed-only HyperFrames MP4 rendering", () => {
 		expect(verifyVideo.mock.calls.map((call) => call[1])).toEqual([true, true]);
 		expect(result.audioNormalization).toBe("normalized");
 		expect(await readFile(result.videoPath, "utf8")).toBe("normalized mp4");
+	});
+	it.each([
+		"first verification",
+		"normalization",
+		"final verification",
+	])("honors cancellation paused at %s, publishes nothing, and releases its lock", async (phase) => {
+		const controller = new AbortController(),
+			child = fakeChild();
+		let reached!: () => void, release!: () => void;
+		const paused = new Promise<void>((resolve) => {
+			reached = resolve;
+		});
+		const resume = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const pause = async () => {
+			reached();
+			await resume;
+		};
+		const spawn = vi.fn((_exe, args: string[]) => {
+			void writeFile(args[args.indexOf("--output") + 1], "raw mp4").then(() =>
+				child.emit("close", 0, null),
+			);
+			return child;
+		});
+		let verifications = 0;
+		const job = renderHyperframesVideo({
+			...renderOptions(),
+			spawn: spawn as never,
+			signal: controller.signal,
+			expectedAudio: phase !== "first verification",
+			verifyVideo: async () => {
+				verifications++;
+				if (
+					phase === "first verification" ||
+					(phase === "final verification" && verifications === 2)
+				)
+					await pause();
+			},
+			normalizeAudio: async ({ outputPath }) => {
+				await writeFile(outputPath, "normalized mp4");
+				if (phase === "normalization") await pause();
+				return "normalized";
+			},
+		});
+		await paused;
+		const rejection = expect(job).rejects.toThrow(/canceled/);
+		controller.abort();
+		release();
+		await rejection;
+		await expect(readFile(path.join(directory, "edited.mp4"))).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+		expect(await readFile(path.join(directory, "index.html"), "utf8")).toContain("doctype");
+		await expect(
+			renderHyperframesVideo({ projectDirectory: directory, executableCandidates: [] }),
+		).rejects.toThrow(/installed.*HyperFrames/i);
+	});
+	it("treats publication as a non-cancelable commit before the asynchronous exclusive link starts", async () => {
+		const controller = new AbortController(),
+			child = fakeChild();
+		let entered!: () => void, release!: () => void;
+		const linking = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const resume = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const onPublicationCommit = vi.fn();
+		const job = renderHyperframesVideo({
+			...renderOptions(),
+			signal: controller.signal,
+			verifyVideo: async () => undefined,
+			spawn: ((_exe, args: string[]) => {
+				void writeFile(args[args.indexOf("--output") + 1], "verified mp4").then(() =>
+					child.emit("close", 0, null),
+				);
+				return child;
+			}) as never,
+			onPublicationCommit,
+			publishVideo: async (source, destination) => {
+				expect(onPublicationCommit).toHaveBeenCalledOnce();
+				entered();
+				await resume;
+				await link(source, destination);
+			},
+		});
+		await linking;
+		controller.abort();
+		release();
+		const result = await job;
+		expect(await readFile(result.videoPath, "utf8")).toBe("verified mp4");
+	});
+	it("preserves another owner's destination if it appears during the exclusive publication window", async () => {
+		const controller = new AbortController(),
+			child = fakeChild();
+		await expect(
+			renderHyperframesVideo({
+				...renderOptions(),
+				signal: controller.signal,
+				verifyVideo: async () => undefined,
+				spawn: ((_exe, args: string[]) => {
+					void writeFile(args[args.indexOf("--output") + 1], "verified mp4").then(() =>
+						child.emit("close", 0, null),
+					);
+					return child;
+				}) as never,
+				publishVideo: async (source, destination) => {
+					await writeFile(destination, "another owner's video", { flag: "wx" });
+					controller.abort();
+					await link(source, destination);
+				},
+			}),
+		).rejects.toMatchObject({ code: "EEXIST" });
+		expect(await readFile(path.join(directory, "edited.mp4"), "utf8")).toBe(
+			"another owner's video",
+		);
+		await expect(renderHyperframesVideo(renderOptions())).rejects.toThrow(/already exists/);
 	});
 });
 

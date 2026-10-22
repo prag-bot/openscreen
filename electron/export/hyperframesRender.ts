@@ -5,6 +5,10 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { ALL_FORMATS, FilePathSource, Input } from "mediabunny";
 
+function throwIfCanceled(signal?: AbortSignal): void {
+	if (signal?.aborted) throw new Error("HyperFrames export canceled; editable project retained");
+}
+
 /** Local installations only. Never use npx, a login shell, or a download fallback. */
 export async function resolveHyperframesExecutable(
 	options: { candidates?: string[] } = {},
@@ -201,6 +205,7 @@ export async function normalizeHyperframesAudio(
 	options: HyperframesAudioNormalizationOptions,
 ): Promise<"normalized" | "silent"> {
 	const executable = options.executable ?? (await resolveInstalledExecutable("ffmpeg"));
+	throwIfCanceled(options.signal);
 	const run = options.run ?? runInstalledTool;
 	const processOptions = { cwd: path.dirname(options.inputPath), signal: options.signal };
 	const target = "loudnorm=I=-16:TP=-1.5:LRA=11";
@@ -221,6 +226,7 @@ export async function normalizeHyperframesAudio(
 		],
 		processOptions,
 	);
+	throwIfCanceled(options.signal);
 	const match = [...analysis.matchAll(/\{[^{}]*"input_i"[^{}]*\}/g)].pop();
 	if (!match)
 		throw new Error(
@@ -267,6 +273,7 @@ export async function normalizeHyperframesAudio(
 		],
 		processOptions,
 	);
+	throwIfCanceled(options.signal);
 	return "normalized";
 }
 
@@ -316,9 +323,13 @@ export interface HyperframesRenderOptions {
 	expectedAudio?: boolean;
 	signal?: AbortSignal;
 	onProgress?: (message: string) => void;
+	/** Synchronous commit boundary. Cancellation is no longer accepted once this is called. */
+	onPublicationCommit?: () => void;
 	spawn?: typeof nodeSpawn;
 	verifyVideo?: typeof verifyHyperframesVideo;
 	normalizeAudio?: typeof normalizeHyperframesAudio;
+	/** Test boundary; production exclusively hard-links the verified owned staging file. */
+	publishVideo?: typeof fs.link;
 }
 
 /** Render the new editable project, preserving it if rendering fails. */
@@ -391,11 +402,14 @@ export async function renderHyperframesVideo(
 				env: { HYPERFRAMES_BROWSER_PATH: browserExecutable },
 			},
 		);
+		throwIfCanceled(options.signal);
 		await (options.verifyVideo ?? verifyHyperframesVideo)(output, options.expectedAudio ?? false);
+		throwIfCanceled(options.signal);
 		let finalOutput = output;
 		let audioNormalization: "normalized" | "silent" | "none" = "none";
 		if (options.expectedAudio) {
 			options.onProgress?.("Normalizing the finished mixed soundtrack for clear speech…");
+			throwIfCanceled(options.signal);
 			const normalized = path.join(scratch, "normalized.mp4");
 			audioNormalization = await (options.normalizeAudio ?? normalizeHyperframesAudio)({
 				inputPath: output,
@@ -403,11 +417,17 @@ export async function renderHyperframesVideo(
 				executable: options.ffmpegExecutable,
 				signal: options.signal,
 			});
+			throwIfCanceled(options.signal);
 			if (audioNormalization === "normalized") finalOutput = normalized;
 			await (options.verifyVideo ?? verifyHyperframesVideo)(finalOutput, true);
+			throwIfCanceled(options.signal);
 		}
-		// Atomic, exclusive final publication: unlike rename, link can never replace an existing file.
-		await fs.link(finalOutput, videoPath);
+		throwIfCanceled(options.signal);
+		// Cancellation and commit are serialized in this synchronous turn. Once publication
+		// starts, late cancellation is explicitly refused through link completion and cleanup.
+		// No rollback unlink is needed, so a concurrent destination owner is never removed.
+		options.onPublicationCommit?.();
+		await (options.publishVideo ?? fs.link)(finalOutput, videoPath);
 		options.onProgress?.("Finished MP4 verified");
 		return { videoPath, audioNormalization };
 	} finally {
