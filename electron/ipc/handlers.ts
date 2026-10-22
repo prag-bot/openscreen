@@ -53,6 +53,7 @@ import {
 	approveProjectMediaPaths,
 	prepareMacPlaybackSession,
 } from "../recording/prepareMacPlayback";
+import { restoreRecordingSession } from "../recording/restoreRecordingSession";
 import { patchWebmDurationOnDisk } from "../recording/webm-duration";
 import { registerAutoEditHandlers } from "./autoEdit";
 import { registerHyperframesExportHandler } from "./hyperframesExport";
@@ -1231,6 +1232,16 @@ async function writeRecordingSessionManifests(session: RecordingSession): Promis
 async function loadRecordedSessionForVideoPath(
 	videoPath: string,
 ): Promise<RecordingSession | null> {
+	return restoreRecordingSession({
+		read: () => readRecordedSessionForVideoPath(videoPath),
+		prepare: preparePlayableSession,
+		persist: writeRecordingSessionManifests,
+	});
+}
+
+async function readRecordedSessionForVideoPath(
+	videoPath: string,
+): Promise<RecordingSession | null> {
 	try {
 		const manifestPath = getSessionManifestPathForVideo(videoPath);
 		if (!isPathAllowed(manifestPath)) {
@@ -1293,12 +1304,8 @@ async function loadRecordedSessionForVideoPath(
 		if (session.webcamVideoPath) {
 			approveFilePath(session.webcamVideoPath);
 		}
-		const prepared = await preparePlayableSession(session);
-		await writeRecordingSessionManifests(prepared);
-		return prepared;
+		return session;
 	} catch (error) {
-		if (error instanceof Error && error.message.startsWith("Could not prepare recording audio."))
-			throw error;
 		const nodeError = error as NodeJS.ErrnoException;
 		if (nodeError.code !== "ENOENT") {
 			console.error("Failed to restore recording session manifest:", error);
@@ -2892,7 +2899,8 @@ export function registerIpcHandlers(
 					screenVideoPath: normalizedPath,
 					createdAt: Date.now(),
 				}));
-			if (session.originalScreenVideoPath) await writeRecordingSessionManifests(session);
+			if (!restoredSession && session.originalScreenVideoPath)
+				await writeRecordingSessionManifests(session);
 			setCurrentRecordingSessionState(session);
 			currentProjectPath = null;
 			return { success: true, path: session.screenVideoPath };

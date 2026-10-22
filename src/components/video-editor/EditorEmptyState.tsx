@@ -1,5 +1,6 @@
 import { AlertCircle, Film, FolderOpen, Upload, X } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
+import { toast } from "sonner";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useScopedT } from "@/contexts/I18nContext";
 import { getProjectFolder, parentDirectoryOf, saveUserPreferences } from "@/lib/userPreferences";
@@ -30,10 +31,15 @@ export function EditorEmptyState({ onVideoImported, onProjectOpened }: EditorEmp
 		if (result.canceled || !result.success || !result.path) return;
 
 		const setResult = await nativeBridgeClient.project.setCurrentVideoPath(result.path);
-		if (!setResult.success) return;
+		if (!setResult.success) {
+			toast.error(
+				setResult.error ?? setResult.message ?? te("emptyState.dropErrors.couldNotOpenMessage"),
+			);
+			return;
+		}
 
 		onVideoImported(setResult.path ?? result.path);
-	}, [onVideoImported]);
+	}, [onVideoImported, te]);
 
 	const handleLoadProject = useCallback(async () => {
 		const result = await nativeBridgeClient.project.loadProjectFile(getProjectFolder());
