@@ -10,6 +10,24 @@ import {
 } from "./recordingSession";
 
 describe("webcam clock persistence", () => {
+	it("retains the immutable capture across session and project round trips", () => {
+		const media = {
+			screenVideoPath: "/screen-playback.mp4",
+			originalScreenVideoPath: " /screen.mp4 ",
+			webcamVideoPath: "/camera.webm",
+			webcamOffsetSeconds: -0.125,
+			cursorCaptureMode: "editable-overlay",
+		};
+		const session = normalizeRecordingSession({ ...media, createdAt: 1234 })!;
+		expect(session).toMatchObject({ ...media, originalScreenVideoPath: "/screen.mp4" });
+		expect(resolveProjectMedia(JSON.parse(createProjectSnapshot(session, {})))).toEqual({
+			...media,
+			originalScreenVideoPath: "/screen.mp4",
+		});
+		expect(
+			normalizeProjectMedia({ screenVideoPath: "/screen.mp4", originalScreenVideoPath: " " }),
+		).toEqual({ screenVideoPath: "/screen.mp4" });
+	});
 	it.each([
 		-1.25, 1.25, 0,
 	])("round trips signed offset %s through session and project JSON", (webcamOffsetSeconds) => {

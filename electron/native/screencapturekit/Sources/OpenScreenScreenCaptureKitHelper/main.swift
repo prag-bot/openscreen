@@ -715,6 +715,19 @@ final class ScreenCaptureRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
 struct OpenScreenScreenCaptureKitHelper {
 	static func main() async {
 		do {
+			// Explicit offline modes return before any recorder/device/permission code.
+			if CommandLine.arguments.count == 4,
+				["--prepare-playback", "--validate-playback"].contains(CommandLine.arguments[1]) {
+				let source = URL(fileURLWithPath: CommandLine.arguments[2])
+				let output = URL(fileURLWithPath: CommandLine.arguments[3])
+				let result = CommandLine.arguments[1] == "--prepare-playback"
+					? try await OfflinePlaybackPreparation.prepare(source: source, output: output)
+					: try await OfflinePlaybackPreparation.validate(source: source, output: output)
+				emit(["event": "playback-ready", "path": output.path,
+					"audioTrackCount": result.audioTrackCount, "audioSampleCount": result.audioSampleCount,
+					"videoSampleCount": result.videoSampleCount])
+				return
+			}
 			guard CommandLine.arguments.count == 2 else {
 				throw HelperError.invalidArguments
 			}

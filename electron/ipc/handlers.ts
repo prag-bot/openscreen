@@ -49,6 +49,10 @@ import {
 	assertNativeMacCaptureIsolation,
 	withRecorderCaptureExclusion,
 } from "../native-bridge/macCaptureIsolation";
+import {
+	approveProjectMediaPaths,
+	prepareMacPlaybackSession,
+} from "../recording/prepareMacPlayback";
 import { patchWebmDurationOnDisk } from "../recording/webm-duration";
 import { registerAutoEditHandlers } from "./autoEdit";
 import { registerHyperframesExportHandler } from "./hyperframesExport";
@@ -314,24 +318,23 @@ async function getApprovedProjectSession(
 		trustedDirs.push(path.dirname(path.resolve(projectFilePath)));
 	}
 
-	const screenVideoPath = await approveReadableVideoPath(media.screenVideoPath, trustedDirs);
-	if (!screenVideoPath) {
-		throw new Error("Project references an invalid or unsupported screen video path");
-	}
-
-	const webcamVideoPath = media.webcamVideoPath
-		? await approveReadableVideoPath(media.webcamVideoPath, trustedDirs)
-		: undefined;
-	if (media.webcamVideoPath && !webcamVideoPath) {
-		throw new Error("Project references an invalid or unsupported webcam video path");
-	}
-
-	return {
-		...media,
-		screenVideoPath,
-		...(webcamVideoPath ? { webcamVideoPath } : {}),
+	const approved = await approveProjectMediaPaths(media, (value) =>
+		approveReadableVideoPath(value, trustedDirs),
+	);
+	const session = await preparePlayableSession({
+		...approved,
 		createdAt: Date.now(),
+	});
+	// Return upgraded media to the renderer as well as updating main-process state.
+	(rawProject as { media?: unknown }).media = {
+		...approved,
+		screenVideoPath: session.screenVideoPath,
+		...(session.originalScreenVideoPath
+			? { originalScreenVideoPath: session.originalScreenVideoPath }
+			: {}),
 	};
+	if (typeof rawProject.videoPath === "string") rawProject.videoPath = session.screenVideoPath;
+	return session;
 }
 
 type SelectedSource = {
@@ -1202,6 +1205,29 @@ function getSessionManifestPathForVideo(videoPath: string) {
 	return path.join(parsedPath.dir, `${baseName}${RECORDING_SESSION_SUFFIX}`);
 }
 
+async function preparePlayableSession(session: RecordingSession): Promise<RecordingSession> {
+	if (
+		process.platform !== "darwin" ||
+		path.extname(session.screenVideoPath).toLowerCase() !== ".mp4"
+	)
+		return session;
+	const prepared = await prepareMacPlaybackSession(session, {
+		helperPath: await findNativeMacCaptureHelperPath(),
+	});
+	approveFilePath(prepared.screenVideoPath);
+	if (prepared.originalScreenVideoPath) approveFilePath(prepared.originalScreenVideoPath);
+	return prepared;
+}
+
+async function writeRecordingSessionManifests(session: RecordingSession): Promise<void> {
+	const manifests = new Set([
+		getSessionManifestPathForVideo(session.screenVideoPath),
+		getSessionManifestPathForVideo(session.originalScreenVideoPath ?? session.screenVideoPath),
+	]);
+	for (const manifest of manifests)
+		await fs.writeFile(manifest, JSON.stringify(session, null, 2), "utf-8");
+}
+
 async function loadRecordedSessionForVideoPath(
 	videoPath: string,
 ): Promise<RecordingSession | null> {
@@ -1225,8 +1251,19 @@ async function loadRecordedSessionForVideoPath(
 		const matchesWebcam =
 			typeof session.webcamVideoPath === "string" &&
 			normalizePath(session.webcamVideoPath) === normalizedVideoPath;
-		if (!matchesScreen && !matchesWebcam) {
+		const matchesOriginal =
+			session.originalScreenVideoPath &&
+			normalizePath(session.originalScreenVideoPath) === normalizedVideoPath;
+		if (!matchesScreen && !matchesWebcam && !matchesOriginal) {
 			return null;
+		}
+		if (session.originalScreenVideoPath) {
+			const approvedOriginal = await approveReadableVideoPath(session.originalScreenVideoPath, [
+				path.dirname(manifestPath),
+				RECORDINGS_DIR,
+			]);
+			if (!approvedOriginal) return null;
+			session.originalScreenVideoPath = approvedOriginal;
 		}
 
 		if (!isPathAllowed(session.screenVideoPath)) {
@@ -1256,8 +1293,12 @@ async function loadRecordedSessionForVideoPath(
 		if (session.webcamVideoPath) {
 			approveFilePath(session.webcamVideoPath);
 		}
-		return session;
+		const prepared = await preparePlayableSession(session);
+		await writeRecordingSessionManifests(prepared);
+		return prepared;
 	} catch (error) {
+		if (error instanceof Error && error.message.startsWith("Could not prepare recording audio."))
+			throw error;
 		const nodeError = error as NodeJS.ErrnoException;
 		if (nodeError.code !== "ENOENT") {
 			console.error("Failed to restore recording session manifest:", error);
@@ -2105,23 +2146,19 @@ export function registerIpcHandlers(
 				await writePendingCursorTelemetry(screenVideoPath);
 			}
 
-			const session: RecordingSession = {
+			const session = await preparePlayableSession({
 				screenVideoPath,
 				createdAt: recordingId,
 				cursorCaptureMode,
-			};
+			});
 			setCurrentRecordingSessionState(session);
 			currentProjectPath = null;
 
-			const sessionManifestPath = path.join(
-				RECORDINGS_DIR,
-				`${path.parse(screenVideoPath).name}${RECORDING_SESSION_SUFFIX}`,
-			);
-			await fs.writeFile(sessionManifestPath, JSON.stringify(session, null, 2), "utf-8");
+			await writeRecordingSessionManifests(session);
 
 			return {
 				success: true,
-				path: screenVideoPath,
+				path: session.screenVideoPath,
 				session,
 				message: "Native macOS recording session stored successfully",
 			};
@@ -2186,25 +2223,25 @@ export function registerIpcHandlers(
 						? payload.recordingId
 						: Date.now();
 				const cursorCaptureMode = normalizeCursorCaptureMode(payload.cursorCaptureMode);
-				const session: RecordingSession = {
-					screenVideoPath,
+				const existingSession =
+					currentRecordingSession?.screenVideoPath === screenVideoPath
+						? currentRecordingSession
+						: await loadRecordedSessionForVideoPath(screenVideoPath);
+				const session = await preparePlayableSession({
+					...(existingSession ?? { screenVideoPath }),
 					webcamVideoPath,
 					webcamOffsetSeconds: payload.webcamOffsetSeconds,
 					createdAt,
 					...(cursorCaptureMode ? { cursorCaptureMode } : {}),
-				};
+				});
 				setCurrentRecordingSessionState(session);
 				currentProjectPath = null;
 
-				const sessionManifestPath = path.join(
-					RECORDINGS_DIR,
-					`${path.parse(screenVideoPath).name}${RECORDING_SESSION_SUFFIX}`,
-				);
-				await fs.writeFile(sessionManifestPath, JSON.stringify(session, null, 2), "utf-8");
+				await writeRecordingSessionManifests(session);
 
 				return {
 					success: true,
-					path: screenVideoPath,
+					path: session.screenVideoPath,
 					session,
 					message: "Native macOS webcam recording attached successfully",
 				};
@@ -2757,6 +2794,11 @@ export function registerIpcHandlers(
 			try {
 				session = await getApprovedProjectSession(project, filePath);
 			} catch (sessionError) {
+				if (
+					sessionError instanceof Error &&
+					sessionError.message.startsWith("Could not prepare recording audio.")
+				)
+					throw sessionError;
 				console.warn(
 					"[loadProjectFileFromPath] Could not approve session paths, proceeding without session:",
 					sessionError,
@@ -2806,12 +2848,25 @@ export function registerIpcHandlers(
 		return setCurrentVideoPath(path);
 	});
 
-	ipcMain.handle("set-current-recording-session", (_, session: RecordingSession | null) => {
+	ipcMain.handle("set-current-recording-session", async (_, session: RecordingSession | null) => {
 		const normalizedSession = normalizeRecordingSession(session);
-		setCurrentRecordingSessionState(normalizedSession);
-		currentVideoPath = normalizedSession?.screenVideoPath ?? null;
-		currentProjectPath = null;
-		return { success: true, session: currentRecordingSession };
+		try {
+			const approvedMedia = normalizedSession
+				? await approveProjectMediaPaths(normalizedSession, async (value) =>
+						resolveApprovedVideoPath(value),
+					)
+				: null;
+			const prepared =
+				normalizedSession && approvedMedia
+					? await preparePlayableSession({ ...normalizedSession, ...approvedMedia })
+					: null;
+			if (prepared?.originalScreenVideoPath) await writeRecordingSessionManifests(prepared);
+			setCurrentRecordingSessionState(prepared);
+			currentProjectPath = null;
+			return { success: true, session: currentRecordingSession };
+		} catch (error) {
+			return { success: false, error: error instanceof Error ? error.message : String(error) };
+		}
 	});
 
 	ipcMain.handle("get-current-recording-session", () => {
@@ -2829,17 +2884,21 @@ export function registerIpcHandlers(
 			};
 		}
 
-		const restoredSession = await loadRecordedSessionForVideoPath(normalizedPath);
-		if (restoredSession) {
-			setCurrentRecordingSessionState(restoredSession);
-		} else {
-			setCurrentRecordingSessionState({
-				screenVideoPath: normalizedPath,
-				createdAt: Date.now(),
-			});
+		try {
+			const restoredSession = await loadRecordedSessionForVideoPath(normalizedPath);
+			const session =
+				restoredSession ??
+				(await preparePlayableSession({
+					screenVideoPath: normalizedPath,
+					createdAt: Date.now(),
+				}));
+			if (session.originalScreenVideoPath) await writeRecordingSessionManifests(session);
+			setCurrentRecordingSessionState(session);
+			currentProjectPath = null;
+			return { success: true, path: session.screenVideoPath };
+		} catch (error) {
+			return { success: false, message: error instanceof Error ? error.message : String(error) };
 		}
-		currentProjectPath = null;
-		return { success: true, path: currentVideoPath ?? normalizedPath };
 	}
 
 	ipcMain.handle("get-current-video-path", () => {

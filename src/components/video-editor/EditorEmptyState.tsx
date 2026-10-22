@@ -32,7 +32,7 @@ export function EditorEmptyState({ onVideoImported, onProjectOpened }: EditorEmp
 		const setResult = await nativeBridgeClient.project.setCurrentVideoPath(result.path);
 		if (!setResult.success) return;
 
-		onVideoImported(result.path);
+		onVideoImported(setResult.path ?? result.path);
 	}, [onVideoImported]);
 
 	const handleLoadProject = useCallback(async () => {

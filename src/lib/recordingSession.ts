@@ -1,5 +1,7 @@
 export interface ProjectMedia {
 	screenVideoPath: string;
+	/** Immutable capture; screenVideoPath may be a single-soundtrack playback derivative. */
+	originalScreenVideoPath?: string;
 	webcamVideoPath?: string;
 	/** Camera start minus screen start. Camera source time = screen time - offset. */
 	webcamOffsetSeconds?: number;
@@ -65,10 +67,12 @@ export function normalizeProjectMedia(candidate: unknown): ProjectMedia | null {
 	}
 
 	const webcamVideoPath = normalizePath(raw.webcamVideoPath);
+	const originalScreenVideoPath = normalizePath(raw.originalScreenVideoPath);
 	const cursorCaptureMode = normalizeCursorCaptureMode(raw.cursorCaptureMode);
 
 	return {
 		screenVideoPath,
+		...(originalScreenVideoPath ? { originalScreenVideoPath } : {}),
 		...(webcamVideoPath ? { webcamVideoPath } : {}),
 		...(webcamVideoPath && raw.webcamOffsetSeconds !== undefined
 			? { webcamOffsetSeconds: normalizeWebcamOffsetSeconds(raw.webcamOffsetSeconds) }
