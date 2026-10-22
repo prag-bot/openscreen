@@ -267,6 +267,11 @@ interface Window {
 		exportHyperframesProject: (
 			request: import("../src/lib/exporter/hyperframesExporter").HyperframesExportRequest,
 		) => Promise<import("../src/lib/exporter/hyperframesExporter").HyperframesExportResult>;
+		exportHyperframesVideo: (
+			request: import("../src/lib/exporter/hyperframesExporter").HyperframesExportRequest,
+		) => Promise<import("../src/lib/exporter/hyperframesExporter").HyperframesVideoResult>;
+		cancelHyperframesExport: () => Promise<{ success: boolean }>;
+		onHyperframesExportProgress: (callback: (message: string) => void) => () => void;
 		getShortcuts: () => Promise<Record<string, unknown> | null>;
 		getAutoEditStatus: () => Promise<import("../src/lib/autoEdit").AutoEditStatus>;
 		prepareAutoEditAudio: (request: {

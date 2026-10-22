@@ -1,5 +1,7 @@
+import { gsap } from "gsap";
 import { describe, expect, it } from "vitest";
 import {
+	buildHyperframesCursorKeyframes,
 	buildKeptClipSegments,
 	createHyperframesComposition,
 	type HyperframesExportRequest,
@@ -21,6 +23,191 @@ export const hyperframesRequest: HyperframesExportRequest = {
 };
 
 const screen = { src: "assets/screen.webm", width: 640, height: 480, durationSeconds: 2 };
+
+describe("HyperFrames cursor cut clock", () => {
+	const samples = [
+		{ timeMs: 0, cx: 0, cy: 0.2, assetId: "arrow", visible: true },
+		{ timeMs: 700, cx: 0.7, cy: 0.8, assetId: "arrow", visible: false },
+		{ timeMs: 1200, cx: 0.8, cy: 0.9, assetId: "arrow", visible: true },
+	];
+	it("seeks to state inside removed footage at a join, without replaying the removed motion", () => {
+		const frames = buildHyperframesCursorKeyframes(
+			samples,
+			buildKeptClipSegments(2, hyperframesRequest.trimRegions),
+		);
+		expect(frames.map((frame) => [frame.timeSeconds, frame.sample.visible])).toEqual([
+			[0, true],
+			[0.5, true],
+			[0.5, false],
+			[0.7, true],
+			[1.5, true],
+		]);
+		expect(frames[2].sample.cx).toBe(0.7);
+		expect(frames[2].cut).toBe(true);
+	});
+	it("emits native assets as editable, escaped images with seek-safe opacity states", () => {
+		const { html } = createHyperframesComposition(
+			{
+				...hyperframesRequest,
+				cursorCaptureMode: "editable-overlay",
+				showCursor: true,
+				cursorSize: 1,
+			},
+			{
+				screen,
+				audio: [],
+				cursor: {
+					samples,
+					assets: [
+						{
+							id: "arrow",
+							src: "assets/cursor-1.png",
+							width: 32,
+							height: 32,
+							hotspotX: 2,
+							hotspotY: 3,
+						},
+					],
+				},
+			},
+		);
+		expect(html).toContain('src="assets/cursor-1.png"');
+		expect(html).toContain('class="cursor-layer"');
+		expect(html).toContain('tl.set("#cursor-1", {opacity:0}, 0.5)');
+		expect(html).not.toMatch(/requestAnimationFrame|\.play\(|currentTime\s*=/);
+	});
+	it("never renders an overlay over a burned-in system cursor or when hidden", () => {
+		for (const patch of [
+			{ cursorCaptureMode: "system" as const, showCursor: true },
+			{ cursorCaptureMode: "editable-overlay" as const, showCursor: false },
+		]) {
+			const { html } = createHyperframesComposition(
+				{ ...hyperframesRequest, ...patch },
+				{
+					screen,
+					audio: [],
+					cursor: {
+						samples,
+						assets: [
+							{
+								id: "arrow",
+								src: "assets/cursor-1.png",
+								width: 32,
+								height: 32,
+								hotspotX: 2,
+								hotspotY: 3,
+							},
+						],
+					},
+				},
+			);
+			expect(html).not.toContain('class="cursor-layer"');
+		}
+	});
+	it("reproduces visibility and position after arbitrary forward/backward GSAP seeks", () => {
+		const { html } = createHyperframesComposition(
+			{
+				...hyperframesRequest,
+				cursorCaptureMode: "editable-overlay",
+				showCursor: true,
+				cursorSize: 1,
+			},
+			{
+				screen,
+				audio: [],
+				cursor: {
+					samples,
+					assets: [
+						{
+							id: "arrow",
+							src: "assets/cursor-1.png",
+							width: 32,
+							height: 32,
+							hotspotX: 2,
+							hotspotY: 3,
+						},
+					],
+				},
+			},
+		);
+		const previousBody = document.body.innerHTML;
+		const parsed = new DOMParser().parseFromString(html, "text/html");
+		document.body.innerHTML = parsed.body.innerHTML;
+		const script = parsed.querySelectorAll("script")[1].textContent;
+		const timeline = new Function("gsap", `${script}; return window.__timelines.openscreen;`)(
+			gsap,
+		) as gsap.core.Timeline;
+		try {
+			for (const [time, visible] of [
+				[0.8, true],
+				[0.5, false],
+				[0.3, true],
+				[0.65, false],
+				[0.1, true],
+			] as const) {
+				timeline.seek(time, false);
+				expect(document.getElementById("cursor-1")?.style.opacity, `at ${time}`).toBe(
+					visible ? "1" : "0",
+				);
+			}
+			timeline.seek(0.8, false);
+			const position = document.getElementById("cursor-1")?.style.transform;
+			timeline.seek(0.1, false);
+			timeline.seek(0.8, false);
+			expect(document.getElementById("cursor-1")?.style.transform).toBe(position);
+		} finally {
+			timeline.kill();
+			document.body.innerHTML = previousBody;
+		}
+	});
+	it("jumps to the new source position at a visible cut, including backward seeks to the exact boundary", () => {
+		const { html } = createHyperframesComposition(
+			{
+				...hyperframesRequest,
+				cursorCaptureMode: "editable-overlay",
+				showCursor: true,
+				cursorSize: 1,
+			},
+			{
+				screen,
+				audio: [],
+				cursor: {
+					samples: samples.map((sample) => ({ ...sample, visible: true })),
+					assets: [
+						{
+							id: "arrow",
+							src: "assets/cursor-1.png",
+							width: 32,
+							height: 32,
+							hotspotX: 2,
+							hotspotY: 3,
+						},
+					],
+				},
+			},
+		);
+		const previousBody = document.body.innerHTML;
+		const parsed = new DOMParser().parseFromString(html, "text/html");
+		document.body.innerHTML = parsed.body.innerHTML;
+		const timeline = new Function(
+			"gsap",
+			`${parsed.querySelectorAll("script")[1].textContent}; return window.__timelines.openscreen;`,
+		)(gsap) as gsap.core.Timeline;
+		try {
+			for (const from of [0.8, 0.1, 1.4]) {
+				timeline.seek(from, false);
+				timeline.seek(0.5, false);
+				expect(Number(gsap.getProperty(document.getElementById("cursor-1"), "x"))).toBeCloseTo(
+					484.4,
+					2,
+				);
+			}
+		} finally {
+			timeline.kill();
+			document.body.innerHTML = previousBody;
+		}
+	});
+});
 
 describe("HyperFrames segment mapping", () => {
 	it("converts millisecond REMOVALS into second-based kept clips", () => {
@@ -219,6 +406,12 @@ describe("HyperFrames IPC payload validation", () => {
 		{ screenVideoPath: "" },
 		{ screenVideoPath: "\0" },
 		{ webcamVideoPath: "" },
+		{ originalScreenVideoPath: "\0" },
+		{ cursorCaptureMode: "made-up" },
+		{ showCursor: "true" },
+		{ cursorSize: 0 },
+		{ cursorSize: Infinity },
+		{ cursorClipToBounds: "true" },
 		{ durationSeconds: 0 },
 	])("rejects malformed values %s", (patch) => {
 		expect(() => validateHyperframesExportRequest({ ...hyperframesRequest, ...patch })).toThrow();

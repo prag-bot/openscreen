@@ -46,6 +46,8 @@ export function AutoEditDialog({
 	const [status, setStatus] = useState<AutoEditStatus | null>(null);
 	const [applying, setApplying] = useState(false);
 	const [applyError, setApplyError] = useState<string | null>(null);
+	const [exportStatus, setExportStatus] = useState("");
+	useEffect(() => window.electronAPI.onHyperframesExportProgress?.(setExportStatus), []);
 	const editor = useAutoEdit(videoPath, durationSeconds, revision);
 	const preview = useMemo(() => {
 		if (!editor.plan) return null;
@@ -94,6 +96,7 @@ export function AutoEditDialog({
 		if (!editor.plan || !preview || preview.error || applying) return;
 		setApplying(true);
 		setApplyError(null);
+		setExportStatus("");
 		try {
 			await onApply(editor.plan, exportHyperframes);
 			onOpenChange(false);
@@ -168,6 +171,11 @@ export function AutoEditDialog({
 							{editor.phase}
 						</p>
 					)}
+					{applying && (
+						<p role="status" className="text-xs text-[#34B27B]">
+							{exportStatus || "Applying reviewed cuts…"}
+						</p>
+					)}
 					{(editor.error || applyError || preview?.error) && (
 						<p
 							role="alert"
@@ -211,6 +219,14 @@ export function AutoEditDialog({
 					)}
 				</div>
 				<DialogFooter className="flex-wrap gap-2">
+					{applying && (
+						<Button
+							variant="outline"
+							onClick={() => void window.electronAPI.cancelHyperframesExport()}
+						>
+							Cancel MP4 render (keep cuts)
+						</Button>
+					)}
 					{editor.phase ? (
 						<Button variant="outline" onClick={editor.cancel}>
 							Cancel auto edit
@@ -247,7 +263,7 @@ export function AutoEditDialog({
 								disabled={busy || !preview || !!preview.error}
 								onClick={() => void apply(true)}
 							>
-								{applying ? "Applying…" : "Apply + export HyperFrames"}
+								{applying ? "Applying / rendering MP4…" : "Apply + render HyperFrames MP4"}
 							</Button>
 						</>
 					)}

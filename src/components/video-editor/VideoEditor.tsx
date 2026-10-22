@@ -221,6 +221,7 @@ export default function VideoEditor() {
 	// Non-undoable state
 	const [videoPath, setVideoPath] = useState<string | null>(null);
 	const [videoSourcePath, setVideoSourcePath] = useState<string | null>(null);
+	const [originalVideoSourcePath, setOriginalVideoSourcePath] = useState<string | null>(null);
 	const { webcamVideoPath, webcamVideoSourcePath, webcamOffsetSeconds, setWebcamMedia } =
 		useWebcamMedia();
 	const [currentProjectPath, setCurrentProjectPath] = useState<string | null>(null);
@@ -269,7 +270,8 @@ export default function VideoEditor() {
 		"newProject" | "loadProject" | null
 	>(null);
 	const playerContainerRef = useRef<HTMLDivElement | null>(null);
-	const cursorTelemetrySourcePath = videoSourcePath ?? (videoPath ? fromFileUrl(videoPath) : null);
+	const cursorTelemetrySourcePath =
+		originalVideoSourcePath ?? videoSourcePath ?? (videoPath ? fromFileUrl(videoPath) : null);
 	const { samples: cursorTelemetry, error: cursorTelemetryError } =
 		useCursorTelemetry(cursorTelemetrySourcePath);
 	const { data: cursorRecordingData, error: cursorRecordingDataError } =
@@ -351,12 +353,14 @@ export default function VideoEditor() {
 			webcamVideoSourcePath ?? (webcamVideoPath ? fromFileUrl(webcamVideoPath) : null);
 		return {
 			screenVideoPath,
+			...(originalVideoSourcePath ? { originalScreenVideoPath: originalVideoSourcePath } : {}),
 			...(webcamSourcePath ? { webcamVideoPath: webcamSourcePath, webcamOffsetSeconds } : {}),
 			...(recordingCursorCaptureMode ? { cursorCaptureMode: recordingCursorCaptureMode } : {}),
 		};
 	}, [
 		videoPath,
 		videoSourcePath,
+		originalVideoSourcePath,
 		webcamVideoPath,
 		webcamVideoSourcePath,
 		webcamOffsetSeconds,
@@ -400,6 +404,7 @@ export default function VideoEditor() {
 
 			setError(null);
 			setVideoSourcePath(sourcePath);
+			setOriginalVideoSourcePath(projectMedia.originalScreenVideoPath ?? null);
 			setVideoPath(toFileUrl(sourcePath));
 			setWebcamMedia(webcamSourcePath, projectWebcamOffset);
 			setRecordingCursorCaptureMode(projectCursorCaptureMode);
@@ -471,6 +476,9 @@ export default function VideoEditor() {
 				createProjectSnapshot(
 					{
 						screenVideoPath: sourcePath,
+						...(projectMedia.originalScreenVideoPath
+							? { originalScreenVideoPath: projectMedia.originalScreenVideoPath }
+							: {}),
 						...(webcamSourcePath
 							? { webcamVideoPath: webcamSourcePath, webcamOffsetSeconds: projectWebcamOffset }
 							: {}),
@@ -572,6 +580,9 @@ export default function VideoEditor() {
 						? fromFileUrl(session.webcamVideoPath)
 						: null;
 					setVideoSourcePath(sourcePath);
+					setOriginalVideoSourcePath(
+						session.originalScreenVideoPath ? fromFileUrl(session.originalScreenVideoPath) : null,
+					);
 					setVideoPath(toFileUrl(sourcePath));
 					const sessionWebcamOffset = webcamSourcePath
 						? normalizeWebcamOffsetSeconds(session.webcamOffsetSeconds)
@@ -583,6 +594,9 @@ export default function VideoEditor() {
 						createProjectSnapshot(
 							{
 								screenVideoPath: sourcePath,
+								...(session.originalScreenVideoPath
+									? { originalScreenVideoPath: fromFileUrl(session.originalScreenVideoPath) }
+									: {}),
 								...(webcamSourcePath
 									? { webcamVideoPath: webcamSourcePath, webcamOffsetSeconds: sessionWebcamOffset }
 									: {}),
@@ -599,6 +613,7 @@ export default function VideoEditor() {
 				const result = await nativeBridgeClient.project.getCurrentVideoPath();
 				if (result.success && result.path) {
 					setVideoSourcePath(result.path);
+					setOriginalVideoSourcePath(null);
 					setVideoPath(toFileUrl(result.path));
 					setWebcamMedia(null);
 					setRecordingCursorCaptureMode(null);
@@ -856,6 +871,7 @@ export default function VideoEditor() {
 		await nativeBridgeClient.project.clearCurrentVideoPath();
 		setVideoPath(null);
 		setVideoSourcePath(null);
+		setOriginalVideoSourcePath(null);
 		setWebcamMedia(null);
 		setCurrentProjectPath(null);
 		setLastSavedSnapshot(null);
@@ -2166,6 +2182,7 @@ export default function VideoEditor() {
 			webcamVideoSourcePath ?? (webcamVideoPath ? fromFileUrl(webcamVideoPath) : null);
 		return {
 			screenVideoPath,
+			...(originalVideoSourcePath ? { originalScreenVideoPath: originalVideoSourcePath } : {}),
 			...(cameraPath ? { webcamVideoPath: cameraPath } : {}),
 			webcamOffsetSeconds,
 			durationSeconds: duration,
@@ -2177,9 +2194,14 @@ export default function VideoEditor() {
 			webcamPosition,
 			webcamMaskShape,
 			webcamMirrored,
+			...(recordingCursorCaptureMode ? { cursorCaptureMode: recordingCursorCaptureMode } : {}),
+			showCursor: recordingCursorCaptureMode === "editable-overlay" && showCursor,
+			cursorSize,
+			cursorClipToBounds,
 		};
 	}, [
 		videoSourcePath,
+		originalVideoSourcePath,
 		videoPath,
 		webcamVideoSourcePath,
 		webcamVideoPath,
@@ -2192,6 +2214,10 @@ export default function VideoEditor() {
 		webcamPosition,
 		webcamMaskShape,
 		webcamMirrored,
+		recordingCursorCaptureMode,
+		showCursor,
+		cursorSize,
+		cursorClipToBounds,
 	]);
 
 	const handleApplyAutoEdit = useCallback(
@@ -2207,16 +2233,22 @@ export default function VideoEditor() {
 				description: "Undo restores the previous timeline. Original footage is unchanged.",
 			});
 			if (request) {
-				const result = await window.electronAPI.exportHyperframesProject(request);
+				const result = await window.electronAPI.exportHyperframesVideo(request);
 				if (!result.success) {
 					if (result.canceled) {
 						toast.info("Cuts applied; HyperFrames export canceled.");
 						return;
 					}
-					throw new Error("Cuts were applied, but HyperFrames export failed: " + result.error);
+					throw new Error(
+						"Cuts were applied, but HyperFrames render failed: " +
+							result.error +
+							(result.projectPath ? ` Editable project retained at ${result.projectPath}` : ""),
+					);
 				}
-				toast.success("Edited HyperFrames project created", { description: result.path });
-				await window.electronAPI.revealInFolder(result.path);
+				if (!result.videoPath?.toLowerCase().endsWith(".mp4"))
+					throw new Error("Cuts were applied, but no finished HyperFrames MP4 was returned.");
+				toast.success("Edited HyperFrames MP4 ready", { description: result.videoPath });
+				await window.electronAPI.revealInFolder(result.videoPath);
 			}
 		},
 		[duration, trimRegions, pushState, getHyperframesExportRequest],
@@ -2660,7 +2692,31 @@ export default function VideoEditor() {
 						onVideoImported={(path) => {
 							setVideoPath(toFileUrl(path));
 							setVideoSourcePath(path);
+							setOriginalVideoSourcePath(null);
 							setWebcamMedia(null);
+							// Import may return a playback derivative. Keep its immutable source and
+							// recording metadata in snapshots and HyperFrames requests as well.
+							void window.electronAPI
+								.getCurrentRecordingSession()
+								.then((result) => {
+									const media = result.success ? result.session : null;
+									if (!media || fromFileUrl(media.screenVideoPath) !== path) return;
+									setOriginalVideoSourcePath(
+										media.originalScreenVideoPath
+											? fromFileUrl(media.originalScreenVideoPath)
+											: null,
+									);
+									setRecordingCursorCaptureMode(media.cursorCaptureMode ?? null);
+									setWebcamMedia(
+										media.webcamVideoPath ? fromFileUrl(media.webcamVideoPath) : null,
+										normalizeWebcamOffsetSeconds(media.webcamOffsetSeconds),
+									);
+								})
+								.catch(() =>
+									toast.warning(
+										"Recording metadata could not be restored. Reload it before exporting to HyperFrames.",
+									),
+								);
 						}}
 						onProjectOpened={async (project, path) => {
 							const restored = await applyLoadedProject(project, path);

@@ -16,16 +16,19 @@ import {
 	createHyperframesComposition,
 	HYPERFRAMES_RAW_FOOTAGE_NOTE,
 	type HyperframesAudioTrack,
+	type HyperframesCursorData,
 	type HyperframesExportRequest,
 	type HyperframesMedia,
 	validateHyperframesDuration,
 	validateHyperframesExportRequest,
 } from "../../src/lib/exporter/hyperframesExporter";
+import { prepareHyperframesCursor } from "./hyperframesCursor";
 
 export interface PreparedHyperframesMedia {
 	screen: HyperframesMedia;
 	webcam?: HyperframesMedia;
 	audio: HyperframesAudioTrack[];
+	cursor?: HyperframesCursorData;
 }
 
 export interface HyperframesProjectOptions {
@@ -47,6 +50,7 @@ export async function prepareHyperframesMedia(
 	assetsDirectory: string,
 ): Promise<PreparedHyperframesMedia> {
 	const audio: HyperframesAudioTrack[] = [];
+	const audioSources = new Set<string>();
 	async function prepare(
 		filePath: string,
 		name: "screen" | "webcam",
@@ -62,7 +66,9 @@ export async function prepareHyperframesMedia(
 			if (!width || !height) throw new Error(`${name} media has invalid dimensions`);
 			const fileName = `${name}${path.extname(filePath).toLowerCase()}`;
 			await fs.copyFile(filePath, path.join(assetsDirectory, fileName), constants.COPYFILE_EXCL);
-			for (const [index, track] of (await input.getAudioTracks()).entries()) {
+			const audioTracks = audioSources.has(filePath) ? [] : await input.getAudioTracks();
+			audioSources.add(filePath);
+			for (const [index, track] of audioTracks.entries()) {
 				if (!track.codec) throw new Error(`Cannot export unknown ${name} audio codec`);
 				const config = await track.getDecoderConfig();
 				if (!config) throw new Error(`Cannot read ${name} audio track ${index + 1}`);
@@ -107,7 +113,13 @@ export async function prepareHyperframesMedia(
 			input.dispose();
 		}
 	}
-	const screen = await prepare(request.screenVideoPath, "screen", 0);
+	// A playback derivative already contains a mix: export the immutable original streams OR
+	// that derivative, never both. This preserves every original track exactly once.
+	const screen = await prepare(
+		request.originalScreenVideoPath ?? request.screenVideoPath,
+		"screen",
+		0,
+	);
 	if (request.durationSeconds > screen.durationSeconds + 0.5) {
 		throw new Error(
 			"Editor duration exceeds available screen footage; reload the recording before exporting",
@@ -121,7 +133,7 @@ export async function prepareHyperframesMedia(
 
 export async function writeHyperframesProject(
 	options: HyperframesProjectOptions,
-): Promise<{ path: string; warnings: string[] }> {
+): Promise<{ path: string; warnings: string[]; audioTrackCount: number }> {
 	const request = validateHyperframesExportRequest(options.request);
 	if (!options.gsapSource.trim()) throw new Error("The bundled GSAP runtime is missing");
 	async function approvedFile(filePath: string): Promise<string> {
@@ -133,6 +145,8 @@ export async function writeHyperframesProject(
 		return approved;
 	}
 	request.screenVideoPath = await approvedFile(request.screenVideoPath);
+	if (request.originalScreenVideoPath)
+		request.originalScreenVideoPath = await approvedFile(request.originalScreenVideoPath);
 	if (request.webcamVideoPath)
 		request.webcamVideoPath = await approvedFile(request.webcamVideoPath);
 
@@ -156,6 +170,11 @@ export async function writeHyperframesProject(
 		await fs.mkdir(assets);
 		await fs.mkdir(path.join(destination, "vendor"));
 		const media = await (options.prepareMedia ?? prepareHyperframesMedia)(request, assets);
+		if (request.cursorCaptureMode === "editable-overlay")
+			media.cursor = await prepareHyperframesCursor(
+				request.originalScreenVideoPath ?? request.screenVideoPath,
+				assets,
+			);
 		const composition = createHyperframesComposition(request, media);
 		await fs.writeFile(path.join(destination, "vendor", "gsap.min.js"), options.gsapSource, {
 			flag: "wx",
@@ -171,6 +190,12 @@ export async function writeHyperframesProject(
 					trimRegions: request.trimRegions,
 					keptSegments: composition.segments,
 					webcamOffsetSeconds: request.webcamOffsetSeconds ?? 0,
+					cursor: {
+						captureMode: request.cursorCaptureMode ?? "unknown",
+						visible: request.showCursor ?? false,
+						size: request.cursorSize ?? 1,
+						clipToBounds: request.cursorClipToBounds !== false,
+					},
 					layout: {
 						width: request.width,
 						height: request.height,
@@ -189,10 +214,14 @@ export async function writeHyperframesProject(
 		);
 		await fs.writeFile(
 			path.join(destination, "README.md"),
-			`# OpenScreen → HyperFrames\n\n${HYPERFRAMES_RAW_FOOTAGE_NOTE}\n\nThis is a local editable project, not a flattened video or an AI auto-trim. No media was uploaded. Full source footage is copied into assets/ so removed footage can be restored. Each retained range is a separate clip.\n\n## Preview and render\n\nRequires Node.js 22+ and HyperFrames. Rendering also requires FFmpeg and the browser supported by your HyperFrames installation. In a terminal, change directory to THIS folder, then run:\n\n\`\`\`sh\nnpx hyperframes lint\nnpx hyperframes validate\nnpx hyperframes preview\n# Once you finish editing:\nnpx hyperframes render --output edited.mp4\n\`\`\`\n\nThese commands are suggestions only; OpenScreen never runs them. npx may download HyperFrames if it is not already installed. GSAP is already bundled locally in vendor/gsap.min.js.\n\n## Editable tracks\n\n- Track 0: screen video (muted).\n- Track 1: camera video, when recorded (muted). With no-webcam selected, camera clips are omitted entirely; the copied camera asset remains available in assets/ to add later.\n- Tracks 10 onward: individual audio streams, losslessly remuxed from the recordings. Silent recordings have no audio clips.\n\nEdit in HyperFrames Studio, or adjust index.html. Keep every video/audio a DIRECT child of the openscreen root. data-start, data-duration and data-media-start use seconds. Original removed ranges in openscreen-export.json use milliseconds. The camera offset is in seconds: positive means camera capture began later than screen capture. Current OpenScreen sessions do not persist a camera start offset, so exports use 0 unless an explicit offset was provided.\n\nThe composition retains static camera layout, size, position, mask, mirroring and visibility. Gaps before a delayed camera or after its footage ends remain gaps, not fabricated frames. Audio timing is aligned to original packet timestamps. Previously mixed system/microphone audio stays mixed; separate source streams stay separate. Unsupported media/codec or missing assets cause export failure instead of silent loss.\n\nThe fixed charcoal/green canvas follows OpenScreen's palette. Use MP4/GIF export in OpenScreen when you need its fully rendered effects.\n`,
+			`# OpenScreen → HyperFrames\n\n${HYPERFRAMES_RAW_FOOTAGE_NOTE}\n\nThis editable local project preserves full source assets in assets/ and exact reviewed removal ranges in openscreen-export.json. No media is uploaded. Each retained range is a separate screen/camera/audio clip; original removed footage remains recoverable.\n\n## Finished video versus project only\n\nOpenScreen’s Render HyperFrames MP4 action runs only an already-installed local HyperFrames executable, then verifies edited.mp4 before reporting success. Its final soundtrack mixes every source audio stream once and uses installed FFmpeg for speech normalization (-16 LUFS, -1.5 dBTP; legitimate silence is not amplified). A failed render retains this project for recovery. Project-only export deliberately creates no video.\n\n## Preview and render manually\n\nRequires an already-installed HyperFrames, Node.js 22+, FFmpeg and Chrome/Chromium. OpenScreen never installs tools. In this folder:\n\n\`\`\`sh\nHYPERFRAMES_NO_UPDATE_CHECK=1 HYPERFRAMES_NO_AUTO_INSTALL=1 hyperframes lint\nHYPERFRAMES_NO_UPDATE_CHECK=1 HYPERFRAMES_NO_AUTO_INSTALL=1 hyperframes validate\nHYPERFRAMES_NO_UPDATE_CHECK=1 HYPERFRAMES_NO_AUTO_INSTALL=1 hyperframes preview\n# The CLI itself can download a browser when none is configured; set an existing browser path explicitly.\nHYPERFRAMES_NO_UPDATE_CHECK=1 HYPERFRAMES_NO_AUTO_INSTALL=1 HYPERFRAMES_BROWSER_PATH=/absolute/path/to/existing/chrome hyperframes render --output edited.mp4\n\`\`\`\n\nGSAP is bundled locally in vendor/gsap.min.js.\n\n## Editable tracks\n\n- Track 0: screen video, muted. The immutable original is used instead of a playback derivative when available.\n- Track 1: camera video, muted; layout, size, position, mask, mirroring and start offset are retained. No-webcam hides its clips, not its source asset.\n- Tracks 10 onward: every original audio stream, losslessly remuxed separately and represented exactly once. Muted video elements cannot double the audio. A source mixed during recording cannot be unmixed.\n- Native cursor: validated recorded positions, hotspot/scale, asset changes and visibility. Source-clock snapshots at every cut join prevent motion across removed footage. Captured native PNGs (or the same bundled shapes used by the editor for telemetry-only capture) are copied locally. System-cursor recordings never get a second overlay.\n\nAll video/audio remain DIRECT children of the openscreen root. data-start, data-duration, data-media-start and camera offset are seconds; removal ranges are milliseconds. Screen, camera, audio and cursor use the same kept source ranges. Gaps before/after delayed camera or audio stay gaps, never fabricated frames.\n\nUnsupported OpenScreen effects listed above are not flattened into this raw-footage composition. Keep editing index.html in HyperFrames Studio when you need additional visual treatments. Original media is never modified.\n`,
 			{ flag: "wx" },
 		);
-		return { path: destination, warnings: [HYPERFRAMES_RAW_FOOTAGE_NOTE] };
+		return {
+			path: destination,
+			warnings: [HYPERFRAMES_RAW_FOOTAGE_NOTE],
+			audioTrackCount: media.audio.length,
+		};
 	} catch (error) {
 		// Remove only the directory created by this invocation, never an existing project or replacement.
 		const current = await fs.lstat(destination).catch(() => null);

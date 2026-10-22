@@ -67,10 +67,10 @@ describe("HyperFrames project filesystem safety", () => {
 			"local runtime",
 		);
 		expect(await readFile(path.join(result.path, "README.md"), "utf8")).toContain(
-			"npx hyperframes preview",
+			"hyperframes preview",
 		);
 		expect(await readFile(path.join(result.path, "README.md"), "utf8")).toContain(
-			"npx hyperframes render",
+			"hyperframes render",
 		);
 	});
 

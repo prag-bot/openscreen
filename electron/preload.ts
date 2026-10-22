@@ -163,6 +163,17 @@ contextBridge.exposeInMainWorld("electronAPI", {
 	) => {
 		return ipcRenderer.invoke("export-hyperframes-project", request);
 	},
+	exportHyperframesVideo: (
+		request: import("../src/lib/exporter/hyperframesExporter").HyperframesExportRequest,
+	) => ipcRenderer.invoke("export-hyperframes-video", request),
+	cancelHyperframesExport: () => ipcRenderer.invoke("cancel-hyperframes-export"),
+	onHyperframesExportProgress: (callback: (message: string) => void) => {
+		const listener = (_event: Electron.IpcRendererEvent, message: unknown) => {
+			if (typeof message === "string") callback(message);
+		};
+		ipcRenderer.on("hyperframes-export-progress", listener);
+		return () => ipcRenderer.removeListener("hyperframes-export-progress", listener);
+	},
 	openVideoFilePicker: () => {
 		return ipcRenderer.invoke("open-video-file-picker");
 	},

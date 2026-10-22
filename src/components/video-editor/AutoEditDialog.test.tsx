@@ -66,7 +66,7 @@ describe("auto edit review dialog", () => {
 			/>,
 		);
 		await screen.findByText("Codex ready");
-		fireEvent.click(screen.getByRole("button", { name: "Apply + export HyperFrames" }));
+		fireEvent.click(screen.getByRole("button", { name: "Apply + render HyperFrames MP4" }));
 		await waitFor(() => expect(apply).toHaveBeenCalledWith(editor.plan, true));
 	});
 	it.each([
@@ -113,7 +113,9 @@ describe("auto edit review dialog", () => {
 		const applyButton = screen.getByRole("button", { name: "Apply cuts" });
 		expect(applyButton.hasAttribute("disabled")).toBe(true);
 		expect(
-			screen.getByRole("button", { name: "Apply + export HyperFrames" }).hasAttribute("disabled"),
+			screen
+				.getByRole("button", { name: "Apply + render HyperFrames MP4" })
+				.hasAttribute("disabled"),
 		).toBe(true);
 		fireEvent.click(applyButton);
 		expect(apply).not.toHaveBeenCalled();
