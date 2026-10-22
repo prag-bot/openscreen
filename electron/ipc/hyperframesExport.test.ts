@@ -68,6 +68,20 @@ describe("explicit HyperFrames project versus video IPC", () => {
 		).toMatchObject({ success: true, path: "/downloads/new-project" });
 		expect(mocks.render).not.toHaveBeenCalled();
 	});
+	it("allows a video-only render when all original audio was cut away", async () => {
+		mocks.project.mockResolvedValueOnce({
+			path: "/downloads/new-project",
+			warnings: [],
+			audioTrackCount: 0,
+		});
+		await expect(
+			mocks.handlers.get("export-hyperframes-video")!(event, {
+				...hyperframesRequest,
+				trimRegions: [{ id: "remove-all-audio", startMs: 1000, endMs: 2000 }],
+			}),
+		).resolves.toMatchObject({ success: true, videoPath: "/downloads/new-project/edited.mp4" });
+		expect(mocks.render).toHaveBeenCalledWith(expect.objectContaining({ expectedAudio: false }));
+	});
 	it("fails missing local tools before creating a project and never claims a video", async () => {
 		mocks.resolve.mockRejectedValue(new Error("No installed local HyperFrames"));
 		expect(

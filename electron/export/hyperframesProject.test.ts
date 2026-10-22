@@ -74,6 +74,41 @@ describe("HyperFrames project filesystem safety", () => {
 		);
 	});
 
+	it.each([
+		{ endMs: 2000, retainedTracks: 0, renderedClips: 0 },
+		{ endMs: 1500, retainedTracks: 1, renderedClips: 1 },
+	])("counts only audio retained after cuts ending at $endMs while preserving full source tracks", async ({
+		endMs,
+		retainedTracks,
+		renderedClips,
+	}) => {
+		const options = exportOptions();
+		const audio = [{ src: "assets/delayed-audio.webm", offsetSeconds: 1, durationSeconds: 1 }];
+		const result = await writeHyperframesProject({
+			...options,
+			request: { ...options.request, trimRegions: [{ id: "cut-audio", startMs: 1000, endMs }] },
+			prepareMedia: async (_request, assets) => {
+				await writeFile(path.join(assets, "delayed-audio.webm"), "complete source audio");
+				return { ...prepared, audio };
+			},
+		});
+		expect(result.audioTrackCount).toBe(retainedTracks);
+		const html = new DOMParser().parseFromString(
+			await readFile(path.join(result.path, "index.html"), "utf8"),
+			"text/html",
+		);
+		expect(html.querySelectorAll("audio")).toHaveLength(renderedClips);
+		const manifest = JSON.parse(
+			await readFile(path.join(result.path, "openscreen-export.json"), "utf8"),
+		);
+		expect(manifest.media.audio).toEqual(audio);
+		expect(manifest.trimRegions).toMatchObject([{ startMs: 1000, endMs }]);
+		expect(await readFile(path.join(result.path, audio[0].src), "utf8")).toBe(
+			"complete source audio",
+		);
+		if (!retainedTracks) expect(manifest.durationSeconds).toBe(1);
+	});
+
 	it("never overwrites an existing folder, file or symlink", async () => {
 		const options = exportOptions();
 		await mkdir(options.targetDirectory);

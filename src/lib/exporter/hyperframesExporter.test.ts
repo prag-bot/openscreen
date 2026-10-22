@@ -298,6 +298,20 @@ describe("HyperFrames segment mapping", () => {
 });
 
 describe("HyperFrames HTML contract", () => {
+	it("counts surviving audio tracks once even across multiple retained clips", () => {
+		const composition = createHyperframesComposition(hyperframesRequest, {
+			screen,
+			audio: [
+				{ src: "assets/full-audio.webm", offsetSeconds: 0, durationSeconds: 2 },
+				{ src: "assets/removed-audio.webm", offsetSeconds: 0.5, durationSeconds: 0.5 },
+			],
+		});
+		const document = new DOMParser().parseFromString(composition.html, "text/html");
+		expect(composition.audioTrackCount).toBe(1);
+		expect(document.querySelectorAll("audio")).toHaveLength(2);
+		expect(document.querySelectorAll('audio[src="assets/removed-audio.webm"]')).toHaveLength(0);
+	});
+
 	it("sizes the root and synchronously registers its exact paused timeline with local GSAP", () => {
 		const { html, durationSeconds } = createHyperframesComposition(hyperframesRequest, {
 			screen,

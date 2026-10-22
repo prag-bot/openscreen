@@ -220,7 +220,7 @@ export async function writeHyperframesProject(
 		return {
 			path: destination,
 			warnings: [HYPERFRAMES_RAW_FOOTAGE_NOTE],
-			audioTrackCount: media.audio.length,
+			audioTrackCount: composition.audioTrackCount,
 		};
 	} catch (error) {
 		// Remove only the directory created by this invocation, never an existing project or replacement.

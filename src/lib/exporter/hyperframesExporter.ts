@@ -333,7 +333,13 @@ export function createHyperframesComposition(
 		audio: HyperframesAudioTrack[];
 		cursor?: HyperframesCursorData;
 	},
-): { html: string; durationSeconds: number; segments: KeptClipSegment[] } {
+): {
+	html: string;
+	durationSeconds: number;
+	segments: KeptClipSegment[];
+	/** Source audio tracks with at least one rendered clip, not all preserved source tracks. */
+	audioTrackCount: number;
+} {
 	const segments = buildKeptClipSegments(request.durationSeconds, request.trimRegions);
 	const durationSeconds = segments.reduce((sum, segment) => sum + segment.duration, 0);
 	const layout = computeCompositeLayout({
@@ -365,12 +371,11 @@ export function createHyperframesComposition(
 			);
 		}
 	}
+	let audioTrackCount = 0;
 	for (const [track, audio] of media.audio.entries()) {
-		for (const [index, segment] of mapKeptClipsToMedia(
-			segments,
-			audio.offsetSeconds,
-			audio.durationSeconds,
-		).entries()) {
+		const audioSegments = mapKeptClipsToMedia(segments, audio.offsetSeconds, audio.durationSeconds);
+		if (audioSegments.length) audioTrackCount += 1;
+		for (const [index, segment] of audioSegments.entries()) {
 			clips.push(
 				`<audio id="audio-${track + 1}-${index + 1}" src="${escapeHyperframesHtml(audio.src)}" ${timing(segment, 10 + track)} data-volume="1" preload="metadata"></audio>`,
 			);
@@ -458,5 +463,5 @@ export function createHyperframesComposition(
 </body>
 </html>
 `;
-	return { html, durationSeconds, segments };
+	return { html, durationSeconds, segments, audioTrackCount };
 }

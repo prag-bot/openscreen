@@ -168,6 +168,27 @@ describe("installed-only HyperFrames MP4 rendering", () => {
 		expect(result.audioNormalization).toBe("normalized");
 		expect(await readFile(result.videoPath, "utf8")).toBe("normalized mp4");
 	});
+	it("publishes a verified video-only edit without attempting audio normalization", async () => {
+		const child = fakeChild();
+		const verifyVideo = vi.fn().mockResolvedValue(undefined);
+		const normalizeAudio = vi.fn();
+		const result = await renderHyperframesVideo({
+			...renderOptions(),
+			expectedAudio: false,
+			verifyVideo,
+			normalizeAudio,
+			spawn: ((_exe, args: string[]) => {
+				void writeFile(args[args.indexOf("--output") + 1], "video-only mp4").then(() =>
+					child.emit("close", 0, null),
+				);
+				return child;
+			}) as never,
+		});
+		expect(verifyVideo.mock.calls.map((call) => call[1])).toEqual([false]);
+		expect(normalizeAudio).not.toHaveBeenCalled();
+		expect(result.audioNormalization).toBe("none");
+		expect(await readFile(result.videoPath, "utf8")).toBe("video-only mp4");
+	});
 	it.each([
 		"first verification",
 		"normalization",

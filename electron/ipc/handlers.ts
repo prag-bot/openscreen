@@ -1242,8 +1242,9 @@ async function loadRecordedSessionForVideoPath(
 async function readRecordedSessionForVideoPath(
 	videoPath: string,
 ): Promise<RecordingSession | null> {
+	const manifestPath = getSessionManifestPathForVideo(videoPath);
+	let session: RecordingSession | null;
 	try {
-		const manifestPath = getSessionManifestPathForVideo(videoPath);
 		if (!isPathAllowed(manifestPath)) {
 			const parsedVideoPath = path.parse(videoPath);
 			if (!isPathWithinDir(path.resolve(manifestPath), parsedVideoPath.dir)) {
@@ -1252,59 +1253,7 @@ async function readRecordedSessionForVideoPath(
 		}
 
 		const content = await fs.readFile(manifestPath, "utf-8");
-		const session = normalizeRecordingSession(JSON.parse(content));
-		if (!session) {
-			return null;
-		}
-
-		const normalizedVideoPath = normalizePath(videoPath);
-		const matchesScreen = normalizePath(session.screenVideoPath) === normalizedVideoPath;
-		const matchesWebcam =
-			typeof session.webcamVideoPath === "string" &&
-			normalizePath(session.webcamVideoPath) === normalizedVideoPath;
-		const matchesOriginal =
-			session.originalScreenVideoPath &&
-			normalizePath(session.originalScreenVideoPath) === normalizedVideoPath;
-		if (!matchesScreen && !matchesWebcam && !matchesOriginal) {
-			return null;
-		}
-		if (session.originalScreenVideoPath) {
-			const approvedOriginal = await approveReadableVideoPath(session.originalScreenVideoPath, [
-				path.dirname(manifestPath),
-				RECORDINGS_DIR,
-			]);
-			if (!approvedOriginal) return null;
-			session.originalScreenVideoPath = approvedOriginal;
-		}
-
-		if (!isPathAllowed(session.screenVideoPath)) {
-			const approvedScreen = await approveReadableVideoPath(session.screenVideoPath, [
-				path.dirname(manifestPath),
-				RECORDINGS_DIR,
-			]);
-			if (!approvedScreen) {
-				return null;
-			}
-			session.screenVideoPath = approvedScreen;
-		}
-
-		if (session.webcamVideoPath && !isPathAllowed(session.webcamVideoPath)) {
-			const approvedWebcam = await approveReadableVideoPath(session.webcamVideoPath, [
-				path.dirname(manifestPath),
-				RECORDINGS_DIR,
-			]);
-			if (!approvedWebcam) {
-				session.webcamVideoPath = undefined;
-			} else {
-				session.webcamVideoPath = approvedWebcam;
-			}
-		}
-
-		approveFilePath(session.screenVideoPath);
-		if (session.webcamVideoPath) {
-			approveFilePath(session.webcamVideoPath);
-		}
-		return session;
+		session = normalizeRecordingSession(JSON.parse(content));
 	} catch (error) {
 		const nodeError = error as NodeJS.ErrnoException;
 		if (nodeError.code !== "ENOENT") {
@@ -1312,6 +1261,47 @@ async function readRecordedSessionForVideoPath(
 		}
 		return null;
 	}
+	if (!session) return null;
+
+	const normalizedVideoPath = normalizePath(videoPath);
+	const matchesScreen = normalizePath(session.screenVideoPath) === normalizedVideoPath;
+	const matchesWebcam =
+		typeof session.webcamVideoPath === "string" &&
+		normalizePath(session.webcamVideoPath) === normalizedVideoPath;
+	const matchesOriginal =
+		session.originalScreenVideoPath &&
+		normalizePath(session.originalScreenVideoPath) === normalizedVideoPath;
+	if (!matchesScreen && !matchesWebcam && !matchesOriginal) return null;
+
+	// Once a parsed manifest matches, missing/unapproved media is a restoration failure,
+	// not absence. Keep this outside the read fallback: otherwise a derivative can be
+	// treated as a new capture and overwrite manifests without its original/camera data.
+	async function approveSessionMedia(filePath: string, label: string): Promise<string> {
+		try {
+			const approved = await approveReadableVideoPath(filePath, [
+				path.dirname(manifestPath),
+				RECORDINGS_DIR,
+			]);
+			if (!approved) throw new Error("Media path is missing or not approved");
+			// Previously approved paths can still have been moved, removed, or made unreadable.
+			if (!(await fs.stat(approved)).isFile()) throw new Error("Media path is not a file");
+			await fs.access(approved, fsConstants.R_OK);
+			return approved;
+		} catch (error) {
+			throw new Error(
+				`Could not restore recording session: ${label} media is missing, unreadable, or not approved at ${filePath}. Session metadata was not discarded. Restore access to the referenced media and retry. ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+	if (session.originalScreenVideoPath)
+		session.originalScreenVideoPath = await approveSessionMedia(
+			session.originalScreenVideoPath,
+			"original screen",
+		);
+	session.screenVideoPath = await approveSessionMedia(session.screenVideoPath, "screen");
+	if (session.webcamVideoPath)
+		session.webcamVideoPath = await approveSessionMedia(session.webcamVideoPath, "webcam");
+	return session;
 }
 
 export function registerIpcHandlers(
