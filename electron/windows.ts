@@ -166,8 +166,8 @@ export function createHudOverlayWindow(): BrowserWindow {
 }
 
 /**
- * Main editor window. Starts maximised with a hidden title bar on macOS; not
- * always-on-top and appears in the taskbar/dock.
+ * Main editor window. Stays above other apps and follows macOS Spaces so the
+ * recording remains reachable when switching apps. Also appears in the dock.
  */
 export function createEditorWindow(): BrowserWindow {
 	const isMac = process.platform === "darwin";
@@ -183,7 +183,7 @@ export function createEditorWindow(): BrowserWindow {
 		}),
 		transparent: false,
 		resizable: true,
-		alwaysOnTop: false,
+		alwaysOnTop: true,
 		skipTaskbar: false,
 		title: "OpenScreen",
 		backgroundColor: "#09090b",
@@ -197,6 +197,10 @@ export function createEditorWindow(): BrowserWindow {
 			backgroundThrottling: false,
 		},
 	});
+
+	if (isMac) {
+		win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+	}
 
 	win.maximize();
 
