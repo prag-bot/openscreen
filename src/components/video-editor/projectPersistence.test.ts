@@ -10,6 +10,39 @@ import {
 } from "./projectPersistence";
 
 describe("projectPersistence media compatibility", () => {
+	it("keeps reviewed presentation timing through save/load and detects an edited switch", () => {
+		const regions = [
+			{ id: "intro", startMs: 0, endMs: 4000, mode: "face-only" as const },
+			{ id: "demo", startMs: 4000, endMs: 9000, mode: "demo" as const },
+		];
+		const editor = normalizeProjectEditor({ presentationRegions: regions });
+		const media = { screenVideoPath: "/tmp/screen.mp4", webcamVideoPath: "/tmp/camera.webm" };
+		const project = createProjectData(media, editor);
+		const restored = normalizeProjectEditor(JSON.parse(JSON.stringify(project)).editor);
+		expect(restored.presentationRegions).toEqual(regions);
+		const before = createProjectSnapshot(media, restored);
+		const after = createProjectSnapshot(media, {
+			...restored,
+			presentationRegions: [
+				{ ...regions[0], endMs: 3500 },
+				{ ...regions[1], startMs: 3500 },
+			],
+		});
+		expect(after).not.toEqual(before);
+		expect(normalizeProjectEditor({}).presentationRegions).toEqual([]);
+	});
+
+	it("rejects ambiguous overlapping presentation ranges instead of losing reviewed edits", () => {
+		expect(() =>
+			normalizeProjectEditor({
+				presentationRegions: [
+					{ id: "face", startMs: 0, endMs: 5000, mode: "face-only" },
+					{ id: "demo", startMs: 4000, endMs: 9000, mode: "demo" },
+				],
+			}),
+		).toThrow();
+	});
+
 	it("accepts legacy projects with a single videoPath", () => {
 		const project = {
 			version: 1,

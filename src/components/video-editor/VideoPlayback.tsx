@@ -39,6 +39,7 @@ import {
 	resolveInterpolatedNativeCursorFrame,
 	resolveNativeCursorRenderAsset,
 } from "@/lib/cursor/nativeCursor";
+import type { PresentationMode } from "@/lib/presentation";
 import { classifyWallpaper, DEFAULT_WALLPAPER, resolveImageWallpaperUrl } from "@/lib/wallpaper";
 import { getCssClipPath } from "@/lib/webcamMaskShapes";
 import { webcamSourceTimeSeconds } from "@/lib/webcamTimeline";
@@ -95,6 +96,7 @@ interface VideoPlaybackProps {
 	videoPath: string;
 	webcamVideoPath?: string;
 	webcamOffsetSeconds?: number;
+	presentationMode?: PresentationMode;
 	webcamLayoutPreset: WebcamLayoutPreset;
 	webcamMaskShape?: import("./types").WebcamMaskShape;
 	webcamMirrored?: boolean;
@@ -223,6 +225,7 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 			videoPath,
 			webcamVideoPath,
 			webcamOffsetSeconds = 0,
+			presentationMode,
 			webcamLayoutPreset,
 			webcamMaskShape,
 			webcamMirrored = false,
@@ -282,6 +285,8 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 		const videoRef = useRef<HTMLVideoElement | null>(null);
 		const supplementalAudioRef = useRef<HTMLAudioElement | null>(null);
 		const webcamVideoRef = useRef<HTMLVideoElement | null>(null);
+		const faceVideoRef = useRef<HTMLVideoElement | null>(null);
+		const [loadedFaceSource, setLoadedFaceSource] = useState<string | null>(null);
 		const webcamWrapperRef = useRef<HTMLDivElement | null>(null);
 		const webcamReactiveZoomRef = useRef(webcamReactiveZoom);
 		const webcamLayoutPresetRef = useRef(webcamLayoutPreset);
@@ -310,6 +315,11 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 			webcamOffsetSeconds,
 			webcamDuration,
 		);
+		const faceOnly =
+			presentationMode === "face-only" &&
+			webcamSourceTime !== null &&
+			!!webcamVideoPath &&
+			loadedFaceSource === webcamVideoPath;
 		const currentTimeRef = useRef(0);
 		const zoomRegionsRef = useRef<ZoomRegion[]>([]);
 		const cursorTelemetryRef = useRef<CursorTelemetryPoint[]>([]);
@@ -1832,7 +1842,7 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 			if (!webcamVideo || !webcamVideoPath) {
 				return;
 			}
-			if (webcamSourceTime === null) {
+			if (webcamSourceTime === null || faceOnly) {
 				webcamVideo.pause();
 				return;
 			}
@@ -1858,7 +1868,7 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 			webcamVideo.play().catch(() => {
 				// Ignore webcam autoplay restoration failures.
 			});
-		}, [currentTime, isPlaying, speedRegions, webcamVideoPath, webcamSourceTime]);
+		}, [currentTime, isPlaying, speedRegions, webcamVideoPath, webcamSourceTime, faceOnly]);
 
 		useEffect(() => {
 			const webcamVideo = webcamVideoRef.current;
@@ -1885,6 +1895,26 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 				}
 			};
 		}, []);
+
+		const syncFaceFrame = useCallback(() => {
+			const video = faceVideoRef.current;
+			if (!video) return;
+			if (presentationMode !== "face-only" || webcamSourceTime === null) {
+				video.pause();
+				return;
+			}
+			if (video.readyState < 1) return;
+			if (Math.abs(video.currentTime - webcamSourceTime) > (isPlaying ? 0.15 : 0.05))
+				video.currentTime = webcamSourceTime;
+			const speed = speedRegions.find(
+				(region) => currentTime * 1000 >= region.startMs && currentTime * 1000 < region.endMs,
+			);
+			video.playbackRate = speed?.speed ?? 1;
+			if (isPlaying) {
+				if (video.paused) void video.play().catch(() => undefined);
+			} else video.pause();
+		}, [presentationMode, webcamSourceTime, isPlaying, speedRegions, currentTime]);
+		useEffect(syncFaceFrame, [syncFaceFrame]);
 
 		const isImageUrl = Boolean(
 			resolvedWallpaper &&
@@ -1927,6 +1957,8 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 					ref={composite3DRef}
 					className="absolute inset-0"
 					style={{
+						opacity: faceOnly ? 0 : 1,
+						visibility: faceOnly ? "hidden" : "visible",
 						transformStyle: "preserve-3d",
 						transformOrigin: "center center",
 					}}
@@ -2122,12 +2154,34 @@ const VideoPlayback = forwardRef<VideoPlaybackRef, VideoPlaybackProps>(
 						</div>
 					)}
 				</div>
+
+				{webcamVideoPath && (
+					<video
+						ref={faceVideoRef}
+						src={webcamVideoPath}
+						aria-label="Face-only presentation preview"
+						className="absolute inset-0 h-full w-full object-cover pointer-events-none"
+						style={{
+							zIndex: 40,
+							opacity: faceOnly ? 1 : 0,
+							transform: webcamMirrored ? "scaleX(-1)" : undefined,
+						}}
+						muted
+						playsInline
+						preload="auto"
+						onLoadedMetadata={syncFaceFrame}
+						onLoadedData={(event) => {
+							setLoadedFaceSource(event.currentTarget.getAttribute("src"));
+							syncFaceFrame();
+						}}
+					/>
+				)}
 				{/* Native cursor clip. Lives outside composite3DRef (preserve-3d) so clip-path
 				    keeps working during 3D zoom rotations; bounds are set dynamically. */}
 				<div
 					ref={nativeCursorClipRef}
 					className="absolute inset-0"
-					style={{ zIndex: 18, pointerEvents: "none" }}
+					style={{ zIndex: 18, pointerEvents: "none", opacity: faceOnly ? 0 : 1 }}
 				>
 					<img
 						ref={nativeCursorImageRef}

@@ -4,44 +4,65 @@ import { nativeBridgeClient } from "../client";
 
 interface UseCursorTelemetryResult {
 	samples: CursorTelemetryPoint[];
+	/** The current recording whose sidecar finished loading successfully. */
+	sourcePath: string | null;
 	loading: boolean;
 	error: string | null;
 }
 
 export function useCursorTelemetry(videoPath: string | null): UseCursorTelemetryResult {
-	const [samples, setSamples] = useState<CursorTelemetryPoint[]>([]);
-	const [loading, setLoading] = useState(false);
-	const [error, setError] = useState<string | null>(null);
+	const [state, setState] = useState<UseCursorTelemetryResult & { requestedPath: string | null }>({
+		requestedPath: null,
+		sourcePath: null,
+		samples: [],
+		loading: false,
+		error: null,
+	});
 
 	useEffect(() => {
 		let cancelled = false;
 
 		async function loadCursorTelemetry() {
 			if (!videoPath) {
-				setSamples([]);
-				setLoading(false);
-				setError(null);
+				setState({
+					requestedPath: null,
+					sourcePath: null,
+					samples: [],
+					loading: false,
+					error: null,
+				});
 				return;
 			}
 
-			setLoading(true);
-			setError(null);
+			setState({
+				requestedPath: videoPath,
+				sourcePath: null,
+				samples: [],
+				loading: true,
+				error: null,
+			});
 
 			try {
 				const nextSamples = await nativeBridgeClient.cursor.getTelemetry(videoPath);
 				if (!cancelled) {
-					setSamples(nextSamples);
+					setState({
+						requestedPath: videoPath,
+						sourcePath: videoPath,
+						samples: nextSamples,
+						loading: false,
+						error: null,
+					});
 				}
 			} catch (nextError) {
 				if (!cancelled) {
-					setSamples([]);
-					setError(
-						nextError instanceof Error ? nextError.message : "Failed to load cursor telemetry",
-					);
-				}
-			} finally {
-				if (!cancelled) {
-					setLoading(false);
+					setState({
+						requestedPath: videoPath,
+						sourcePath: null,
+						samples: [],
+						loading: false,
+						error:
+							nextError instanceof Error ? nextError.message : "Failed to load cursor telemetry",
+					});
 				}
 			}
 		}
@@ -53,9 +74,12 @@ export function useCursorTelemetry(videoPath: string | null): UseCursorTelemetry
 		};
 	}, [videoPath]);
 
+	// Mask the preceding source during the render before the replacement's effect runs.
+	const current = state.requestedPath === videoPath;
 	return {
-		samples,
-		loading,
-		error,
+		samples: current ? state.samples : [],
+		sourcePath: current ? state.sourcePath : null,
+		loading: !!videoPath && (!current || state.loading),
+		error: current ? state.error : null,
 	};
 }

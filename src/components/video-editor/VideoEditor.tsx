@@ -53,6 +53,12 @@ import {
 } from "@/lib/exporter";
 import type { HyperframesExportRequest } from "@/lib/exporter/hyperframesExporter";
 import { computeFrameStepTime } from "@/lib/frameStep";
+import {
+	getPresentationModeAt,
+	type PresentationRegion,
+	suggestPresentationRegions,
+	validatePresentationRegions,
+} from "@/lib/presentation";
 import type { CursorCaptureMode, ProjectMedia } from "@/lib/recordingSession";
 import { normalizeWebcamOffsetSeconds } from "@/lib/recordingSession";
 import { matchesShortcut } from "@/lib/shortcuts";
@@ -82,6 +88,7 @@ import {
 } from "./editorDefaults";
 import { HyperframesExportButton } from "./HyperframesExportButton";
 import PlaybackControls from "./PlaybackControls";
+import { PresentationEditDialog } from "./PresentationEditDialog";
 import {
 	createProjectData,
 	createProjectSnapshot,
@@ -201,6 +208,7 @@ export default function VideoEditor() {
 		trimRegions,
 		speedRegions,
 		annotationRegions,
+		presentationRegions,
 		cropRegion,
 		wallpaper,
 		shadowIntensity,
@@ -245,6 +253,8 @@ export default function VideoEditor() {
 	const [exportError, setExportError] = useState<string | null>(null);
 	const [showExportDialog, setShowExportDialog] = useState(false);
 	const [showAutoEditDialog, setShowAutoEditDialog] = useState(false);
+	const [showPresentationDialog, setShowPresentationDialog] = useState(false);
+	const presentationJob = useRef<{ id: string; controller: AbortController } | null>(null);
 	const [showNewRecordingDialog, setShowNewRecordingDialog] = useState(false);
 	const [exportQuality, setExportQuality] = useState<ExportQuality>(
 		DEFAULT_EXPORT_SETTINGS.quality,
@@ -272,10 +282,18 @@ export default function VideoEditor() {
 	const playerContainerRef = useRef<HTMLDivElement | null>(null);
 	const cursorTelemetrySourcePath =
 		originalVideoSourcePath ?? videoSourcePath ?? (videoPath ? fromFileUrl(videoPath) : null);
-	const { samples: cursorTelemetry, error: cursorTelemetryError } =
-		useCursorTelemetry(cursorTelemetrySourcePath);
-	const { data: cursorRecordingData, error: cursorRecordingDataError } =
-		useCursorRecordingData(cursorTelemetrySourcePath);
+	const {
+		samples: cursorTelemetry,
+		error: cursorTelemetryError,
+		loading: cursorTelemetryLoading,
+		sourcePath: cursorTelemetryLoadedSource,
+	} = useCursorTelemetry(cursorTelemetrySourcePath);
+	const {
+		data: cursorRecordingData,
+		error: cursorRecordingDataError,
+		loading: cursorRecordingLoading,
+		sourcePath: cursorRecordingLoadedSource,
+	} = useCursorRecordingData(cursorTelemetrySourcePath);
 	const cursorClickTimestamps = useMemo<number[]>(() => {
 		const recordingClicks =
 			cursorRecordingData?.samples
@@ -391,6 +409,7 @@ export default function VideoEditor() {
 				...normalizedEditor.trimRegions.map((region) => region.endMs),
 				...normalizedEditor.speedRegions.map((region) => region.endMs),
 				...normalizedEditor.annotationRegions.map((region) => region.endMs),
+				...(normalizedEditor.presentationRegions ?? []).map((region) => region.endMs),
 			);
 
 			try {
@@ -429,6 +448,7 @@ export default function VideoEditor() {
 				trimRegions: normalizedEditor.trimRegions,
 				speedRegions: normalizedEditor.speedRegions,
 				annotationRegions: normalizedEditor.annotationRegions,
+				presentationRegions: normalizedEditor.presentationRegions ?? [],
 				aspectRatio: normalizedEditor.aspectRatio,
 				webcamLayoutPreset: normalizedEditor.webcamLayoutPreset,
 				webcamMaskShape: normalizedEditor.webcamMaskShape,
@@ -511,6 +531,7 @@ export default function VideoEditor() {
 			trimRegions,
 			speedRegions,
 			annotationRegions,
+			presentationRegions,
 			aspectRatio,
 			webcamLayoutPreset,
 			webcamMaskShape,
@@ -542,6 +563,7 @@ export default function VideoEditor() {
 		trimRegions,
 		speedRegions,
 		annotationRegions,
+		presentationRegions,
 		aspectRatio,
 		webcamLayoutPreset,
 		webcamMaskShape,
@@ -682,6 +704,7 @@ export default function VideoEditor() {
 				trimRegions,
 				speedRegions,
 				annotationRegions,
+				presentationRegions,
 				aspectRatio,
 				webcamLayoutPreset,
 				webcamMaskShape,
@@ -747,6 +770,7 @@ export default function VideoEditor() {
 			trimRegions,
 			speedRegions,
 			annotationRegions,
+			presentationRegions,
 			aspectRatio,
 			webcamLayoutPreset,
 			webcamMaskShape,
@@ -1858,6 +1882,10 @@ export default function VideoEditor() {
 
 	const handleExport = useCallback(
 		async (settings: ExportSettings) => {
+			if (presentationRegions.length) {
+				toast.error("Use HyperFrames MP4 to render the reviewed face/screen switches.");
+				return;
+			}
 			if (!videoPath) {
 				toast.error("No video loaded");
 				return;
@@ -2159,8 +2187,117 @@ export default function VideoEditor() {
 			cursorClickBounce,
 			cursorClipToBounds,
 			cursorTheme,
+			presentationRegions,
 			t,
 		],
+	);
+
+	const cancelPresentationSuggestion = useCallback(() => {
+		const job = presentationJob.current;
+		presentationJob.current = null;
+		job?.controller.abort();
+		if (job) void window.electronAPI.cancelAutoEdit(job.id).catch(() => undefined);
+	}, []);
+	const presentationSourceKey = JSON.stringify([
+		videoPath,
+		webcamVideoPath,
+		currentProjectPath,
+		webcamOffsetSeconds,
+		duration,
+	]);
+	const presentationSourceKeyRef = useRef(presentationSourceKey);
+	presentationSourceKeyRef.current = presentationSourceKey;
+	const lastPresentationSourceKey = useRef(presentationSourceKey);
+	useEffect(() => {
+		if (lastPresentationSourceKey.current === presentationSourceKey) return;
+		lastPresentationSourceKey.current = presentationSourceKey;
+		cancelPresentationSuggestion();
+		setShowPresentationDialog(false);
+	}, [presentationSourceKey, cancelPresentationSuggestion]);
+	useEffect(() => cancelPresentationSuggestion, [cancelPresentationSuggestion]);
+
+	const suggestPresentation = useCallback(async (): Promise<PresentationRegion[]> => {
+		if (!videoPath || !webcamVideoPath || duration <= 0)
+			throw new Error("Load a recording with webcam footage first.");
+		const nativeReady =
+			!cursorRecordingLoading && cursorRecordingLoadedSource === cursorTelemetrySourcePath;
+		const telemetryReady =
+			!cursorTelemetryLoading && cursorTelemetryLoadedSource === cursorTelemetrySourcePath;
+		if (!nativeReady && !telemetryReady)
+			throw new Error(
+				"Cursor activity for this recording is not ready. Wait for it to load, or mark the views manually.",
+			);
+		const sourceCursorSamples =
+			nativeReady && cursorRecordingData?.samples.length
+				? cursorRecordingData.samples
+				: telemetryReady
+					? cursorTelemetry
+					: [];
+		const sourceKey = presentationSourceKey;
+		cancelPresentationSuggestion();
+		const job = { id: crypto.randomUUID(), controller: new AbortController() };
+		presentationJob.current = job;
+		try {
+			const audio = await window.electronAPI.prepareAutoEditAudio({
+				jobId: job.id,
+				videoPath: originalVideoSourcePath ?? videoSourcePath ?? videoPath,
+			});
+			if (job.controller.signal.aborted || presentationSourceKeyRef.current !== sourceKey)
+				throw new Error("Presentation analysis canceled because the recording changed.");
+			if (!audio.success || !audio.path) throw new Error(audio.error || "Cannot read narration.");
+			const { samples, truncated } = await extractMono16kFromVideoUrl(audio.path, {
+				signal: job.controller.signal,
+			});
+			if (job.controller.signal.aborted || presentationSourceKeyRef.current !== sourceKey)
+				throw new Error("Presentation analysis canceled because the recording changed.");
+			if (truncated)
+				throw new Error("Split this long recording before suggesting presentation switches.");
+			return suggestPresentationRegions({
+				samples,
+				durationMs: duration * 1000,
+				cursorTelemetry: sourceCursorSamples,
+				webcamOffsetMs: webcamOffsetSeconds * 1000,
+			});
+		} finally {
+			if (presentationJob.current === job) presentationJob.current = null;
+			void window.electronAPI.cancelAutoEdit(job.id).catch(() => undefined);
+		}
+	}, [
+		videoPath,
+		originalVideoSourcePath,
+		videoSourcePath,
+		webcamVideoPath,
+		duration,
+		cursorRecordingData,
+		cursorTelemetry,
+		cursorRecordingLoading,
+		cursorTelemetryLoading,
+		cursorRecordingLoadedSource,
+		cursorTelemetryLoadedSource,
+		cursorTelemetrySourcePath,
+		presentationSourceKey,
+		webcamOffsetSeconds,
+		cancelPresentationSuggestion,
+	]);
+
+	const applyPresentation = useCallback(
+		(regions: PresentationRegion[]) => {
+			const approved = validatePresentationRegions(regions, duration * 1000);
+			pushState({ presentationRegions: approved });
+			toast.success(
+				approved.length ? "Presentation switches applied" : "Presentation switches cleared",
+				{
+					description:
+						"Undo restores the previous layout. Render these switches with HyperFrames MP4.",
+				},
+			);
+		},
+		[duration, pushState],
+	);
+
+	const presentationMode = getPresentationModeAt(
+		presentationRegions,
+		Math.min(currentTime * 1000, Math.max(0, duration * 1000 - 0.001)),
 	);
 
 	const getHyperframesExportRequest = useCallback((): HyperframesExportRequest => {
@@ -2189,6 +2326,7 @@ export default function VideoEditor() {
 			width: canvas.width,
 			height: canvas.height,
 			trimRegions,
+			presentationRegions,
 			webcamLayoutPreset,
 			webcamSizePreset,
 			webcamPosition,
@@ -2209,6 +2347,7 @@ export default function VideoEditor() {
 		aspectRatio,
 		duration,
 		trimRegions,
+		presentationRegions,
 		webcamLayoutPreset,
 		webcamSizePreset,
 		webcamPosition,
@@ -2609,6 +2748,20 @@ export default function VideoEditor() {
 				</DialogContent>
 			</Dialog>
 
+			<PresentationEditDialog
+				open={showPresentationDialog}
+				onOpenChange={(open) => {
+					setShowPresentationDialog(open);
+					if (!open) cancelPresentationSuggestion();
+				}}
+				durationSeconds={duration}
+				screenVideoPath={videoPath}
+				webcamVideoPath={webcamVideoPath ?? undefined}
+				webcamOffsetSeconds={webcamOffsetSeconds}
+				regions={presentationRegions}
+				onSuggest={suggestPresentation}
+				onApply={applyPresentation}
+			/>
 			<AutoEditDialog
 				open={showAutoEditDialog}
 				onOpenChange={setShowAutoEditDialog}
@@ -2672,6 +2825,16 @@ export default function VideoEditor() {
 					>
 						<Save size={14} />
 						{ts("project.save")}
+					</button>
+
+					<button
+						type="button"
+						onClick={() => setShowPresentationDialog(true)}
+						disabled={!videoPath || isExporting || isAutoCaptioning}
+						className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[#34B27B] hover:bg-[#34B27B]/10 disabled:opacity-40 transition-colors text-[11px] font-medium"
+					>
+						<Video size={14} />
+						Presentation edit
 					</button>
 					<button
 						type="button"
@@ -2767,12 +2930,15 @@ export default function VideoEditor() {
 													videoPath={videoPath || ""}
 													webcamVideoPath={webcamVideoPath || undefined}
 													webcamOffsetSeconds={webcamOffsetSeconds}
-													webcamLayoutPreset={webcamLayoutPreset}
+													webcamLayoutPreset={
+														presentationMode ? "picture-in-picture" : webcamLayoutPreset
+													}
+													presentationMode={presentationMode}
 													webcamMaskShape={webcamMaskShape}
 													webcamMirrored={webcamMirrored}
-													webcamReactiveZoom={webcamReactiveZoom}
+													webcamReactiveZoom={presentationMode ? false : webcamReactiveZoom}
 													webcamSizePreset={webcamSizePreset}
-													webcamPosition={webcamPosition}
+													webcamPosition={presentationMode ? null : webcamPosition}
 													onWebcamPositionChange={(pos) => updateState({ webcamPosition: pos })}
 													onWebcamPositionDragEnd={commitState}
 													onDurationChange={setDuration}
@@ -2811,7 +2977,11 @@ export default function VideoEditor() {
 													onBlurDataCommit={commitState}
 													cursorTelemetry={cursorTelemetry}
 													cursorClickTimestamps={cursorClickTimestamps}
-													showCursor={effectiveShowCursor}
+													showCursor={
+														presentationMode === "demo"
+															? hasEditableCursorRecording
+															: effectiveShowCursor
+													}
 													cursorSize={cursorSize}
 													cursorSmoothing={cursorSmoothing}
 													cursorMotionBlur={cursorMotionBlur}

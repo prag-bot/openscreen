@@ -74,6 +74,92 @@ describe("HyperFrames project filesystem safety", () => {
 		);
 	});
 
+	it("retains reviewed presentation choices and reports camera-gap fallbacks without altering source media", async () => {
+		const options = exportOptions();
+		const presentationRegions = [
+			{
+				id: "face",
+				startMs: 0,
+				endMs: 2000,
+				mode: "face-only" as const,
+				reason: "Reviewed introduction",
+			},
+		];
+		const result = await writeHyperframesProject({
+			...options,
+			request: {
+				...options.request,
+				webcamVideoPath: source,
+				webcamOffsetSeconds: 0.25,
+				presentationRegions,
+			},
+			prepareMedia: async () => ({
+				...prepared,
+				webcam: { src: "assets/webcam.webm", durationSeconds: 1, width: 640, height: 480 },
+			}),
+		});
+		const manifest = JSON.parse(
+			await readFile(path.join(result.path, "openscreen-export.json"), "utf8"),
+		);
+		expect(manifest.presentationRegions).toEqual(presentationRegions);
+		expect(manifest.units.presentationRegions).toBe("milliseconds");
+		expect(manifest.keptSegments).toHaveLength(2);
+		expect(manifest.visualSegments).toEqual([
+			{
+				sourceStart: 0,
+				timelineStart: 0,
+				duration: 0.25,
+				mode: "demo",
+				requestedMode: "face-only",
+			},
+			{
+				sourceStart: 0.25,
+				timelineStart: 0.25,
+				duration: 0.25,
+				mode: "face-only",
+				requestedMode: "face-only",
+			},
+			{
+				sourceStart: 1,
+				timelineStart: 0.5,
+				duration: 0.25,
+				mode: "face-only",
+				requestedMode: "face-only",
+			},
+			{
+				sourceStart: 1.25,
+				timelineStart: 0.75,
+				duration: 0.75,
+				mode: "demo",
+				requestedMode: "face-only",
+			},
+		]);
+		expect(manifest.warnings).toHaveLength(1);
+		expect(manifest.warnings[0]).toMatch(/1 seconds.*demo layout/);
+		expect(result.warnings).toContain(manifest.warnings[0]);
+		expect(await readFile(source, "utf8")).toBe("test media");
+		const doc = new DOMParser().parseFromString(
+			await readFile(path.join(result.path, "index.html"), "utf8"),
+			"text/html",
+		);
+		expect(doc.querySelectorAll(".screen-demo")).toHaveLength(2);
+		expect(doc.querySelectorAll(".webcam-face-only")).toHaveLength(2);
+	});
+
+	it("rejects an invalid presentation plan before creating the export directory", async () => {
+		const options = exportOptions();
+		await expect(
+			writeHyperframesProject({
+				...options,
+				request: {
+					...options.request,
+					presentationRegions: [{ id: "invalid", startMs: 1000, endMs: 3000, mode: "face-only" }],
+				},
+			}),
+		).rejects.toThrow();
+		await expect(stat(options.targetDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+	});
+
 	it.each([
 		{ endMs: 2000, retainedTracks: 0, renderedClips: 0 },
 		{ endMs: 1500, retainedTracks: 1, renderedClips: 1 },

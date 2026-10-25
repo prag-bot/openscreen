@@ -391,6 +391,338 @@ describe("HyperFrames HTML contract", () => {
 	});
 });
 
+describe("reviewed presentation switches", () => {
+	const webcam = { ...screen, src: "assets/webcam.webm", durationSeconds: 4 };
+	const face = { id: "face", startMs: 500, endMs: 2500, mode: "face-only" as const };
+	const demo = { id: "demo", startMs: 2500, endMs: 3500, mode: "demo" as const };
+
+	it("splits visuals on source-time switches across a removed range without splitting audio", () => {
+		const composition = createHyperframesComposition(
+			{
+				...hyperframesRequest,
+				durationSeconds: 4,
+				trimRegions: [{ id: "cut", startMs: 1000, endMs: 2000 }],
+				presentationRegions: [face, demo],
+			},
+			{
+				screen: { ...screen, durationSeconds: 4 },
+				webcam,
+				audio: [{ src: "assets/voice.webm", offsetSeconds: 0, durationSeconds: 4 }],
+			},
+		);
+		expect(composition.durationSeconds).toBe(3);
+		expect(composition.visualSegments).toEqual([
+			{ sourceStart: 0, timelineStart: 0, duration: 0.5, mode: "legacy" },
+			{
+				sourceStart: 0.5,
+				timelineStart: 0.5,
+				duration: 0.5,
+				mode: "face-only",
+				requestedMode: "face-only",
+			},
+			{
+				sourceStart: 2,
+				timelineStart: 1,
+				duration: 0.5,
+				mode: "face-only",
+				requestedMode: "face-only",
+			},
+			{ sourceStart: 2.5, timelineStart: 1.5, duration: 1, mode: "demo", requestedMode: "demo" },
+			{ sourceStart: 3.5, timelineStart: 2.5, duration: 0.5, mode: "legacy" },
+		]);
+		const doc = new DOMParser().parseFromString(composition.html, "text/html");
+		expect(doc.querySelectorAll("video.screen")).toHaveLength(3);
+		expect(doc.querySelectorAll("video.webcam-face-only")).toHaveLength(2);
+		expect(doc.querySelectorAll("audio")).toHaveLength(2);
+		expect(doc.getElementById("audio-1-2")?.getAttribute("data-media-start")).toBe("2");
+		for (const element of doc.querySelectorAll("video,audio"))
+			expect(element.parentElement?.id).toBe("openscreen");
+		expect(composition.html).toContain(
+			".webcam-face-only { left:0;top:0;width:640px;height:480px;opacity:1;border-radius:0;clip-path:none;",
+		);
+	});
+
+	it("explicit demo restores a bottom-right camera even when the legacy layout hides it", () => {
+		const { html } = createHyperframesComposition(
+			{
+				...hyperframesRequest,
+				webcamLayoutPreset: "no-webcam",
+				webcamPosition: { cx: 0.1, cy: 0.1 },
+				presentationRegions: [{ ...demo, startMs: 0, endMs: 2000 }],
+			},
+			{ screen, webcam, audio: [] },
+		);
+		const doc = new DOMParser().parseFromString(html, "text/html");
+		expect(doc.querySelectorAll(".webcam-demo")).toHaveLength(2);
+		expect(html).toContain(".webcam-demo { left:526px;top:366px;width:104px;height:104px");
+	});
+
+	it.each([
+		{
+			offset: 1,
+			cameraDuration: 2,
+			expected: [
+				[0, 1, "demo"],
+				[1, 2, "face-only"],
+				[3, 1, "demo"],
+			],
+		},
+		{
+			offset: -1,
+			cameraDuration: 3,
+			expected: [
+				[0, 2, "face-only"],
+				[2, 2, "demo"],
+			],
+		},
+	])("falls back to demo only outside camera availability at offset $offset", ({
+		offset,
+		cameraDuration,
+		expected,
+	}) => {
+		const composition = createHyperframesComposition(
+			{
+				...hyperframesRequest,
+				durationSeconds: 4,
+				trimRegions: [],
+				webcamOffsetSeconds: offset,
+				presentationRegions: [{ ...face, startMs: 0, endMs: 4000 }],
+			},
+			{
+				screen: { ...screen, durationSeconds: 4 },
+				webcam: { ...webcam, durationSeconds: cameraDuration },
+				audio: [],
+			},
+		);
+		expect(
+			composition.visualSegments.map((segment) => [
+				segment.sourceStart,
+				segment.duration,
+				segment.mode,
+			]),
+		).toEqual(expected);
+		expect(composition.warnings).toHaveLength(1);
+		expect(composition.warnings[0]).toMatch(/2 seconds.*demo layout/);
+		const doc = new DOMParser().parseFromString(composition.html, "text/html");
+		expect(doc.querySelectorAll(".webcam-face-only")).toHaveLength(1);
+		expect(doc.querySelectorAll(".screen-demo")).toHaveLength(offset === 1 ? 2 : 1);
+		expect(Number(doc.querySelector(".webcam-face-only")?.getAttribute("data-media-start"))).toBe(
+			offset === 1 ? 0 : 1,
+		);
+	});
+
+	it("rejects face-only without a camera, and needs no cursor telemetry when every kept visual is face-only", () => {
+		const request = {
+			...hyperframesRequest,
+			cursorCaptureMode: "editable-overlay" as const,
+			showCursor: true,
+			presentationRegions: [{ ...face, startMs: 0, endMs: 2000 }],
+		};
+		expect(() => createHyperframesComposition(request, { screen, audio: [] })).toThrow(
+			/requires recorded webcam/,
+		);
+		const composition = createHyperframesComposition(request, { screen, webcam, audio: [] });
+		const doc = new DOMParser().parseFromString(composition.html, "text/html");
+		expect(doc.querySelector(".screen")).toBeNull();
+		expect(doc.querySelector(".cursor-layer")).toBeNull();
+		expect(doc.querySelectorAll(".webcam-face-only")).toHaveLength(2);
+	});
+
+	it("restores the correct cursor layer after arbitrary backward seeks and exact mode/cut boundaries", () => {
+		const { html } = createHyperframesComposition(
+			{
+				...hyperframesRequest,
+				cursorCaptureMode: "editable-overlay",
+				showCursor: true,
+				presentationRegions: [
+					{ ...face, startMs: 250, endMs: 1250 },
+					{ ...demo, startMs: 1250, endMs: 1750 },
+				],
+			},
+			{
+				screen,
+				webcam,
+				audio: [],
+				cursor: {
+					samples: [
+						{ timeMs: 0, cx: 0.1, cy: 0.2, assetId: "arrow", visible: true },
+						{ timeMs: 2000, cx: 0.9, cy: 0.8, assetId: "arrow", visible: true },
+					],
+					assets: [
+						{
+							id: "arrow",
+							src: "assets/cursor.png",
+							width: 32,
+							height: 32,
+							hotspotX: 0,
+							hotspotY: 0,
+						},
+					],
+				},
+			},
+		);
+		const previousBody = document.body.innerHTML;
+		const parsed = new DOMParser().parseFromString(html, "text/html");
+		document.body.innerHTML = parsed.body.innerHTML;
+		const timeline = new Function(
+			"gsap",
+			`${parsed.querySelectorAll("script")[1].textContent}; return window.__timelines.openscreen;`,
+		)(gsap) as gsap.core.Timeline;
+		try {
+			for (const [time, legacy, demoVisible] of [
+				[0.8, 0, 1],
+				[0.25, 0, 0],
+				[0.2, 1, 0],
+				[0.75, 0, 1],
+				[1.25, 1, 0],
+				[0.5, 0, 0],
+				[0.1, 1, 0],
+			] as const) {
+				timeline.seek(time, false);
+				expect(document.getElementById("cursor-layer")?.style.opacity, `legacy at ${time}`).toBe(
+					String(legacy),
+				);
+				expect(document.getElementById("cursor-demo-layer")?.style.opacity, `demo at ${time}`).toBe(
+					String(demoVisible),
+				);
+			}
+		} finally {
+			timeline.kill();
+			document.body.innerHTML = previousBody;
+		}
+	});
+
+	it("forces an editable cursor only in reviewed demo intervals when the global cursor is hidden", () => {
+		const request = {
+			...hyperframesRequest,
+			cursorCaptureMode: "editable-overlay" as const,
+			showCursor: false,
+			presentationRegions: [
+				{ ...face, startMs: 250, endMs: 1250 },
+				{ ...demo, startMs: 1250, endMs: 1750 },
+			],
+		};
+		const media = {
+			screen,
+			webcam,
+			audio: [],
+			cursor: {
+				samples: [{ timeMs: 0, cx: 0.2, cy: 0.3, assetId: "arrow", visible: true }],
+				assets: [
+					{
+						id: "arrow",
+						src: "assets/cursor.png",
+						width: 32,
+						height: 32,
+						hotspotX: 0,
+						hotspotY: 0,
+					},
+				],
+			},
+		};
+		const { html } = createHyperframesComposition(request, media);
+		const previousBody = document.body.innerHTML;
+		const parsed = new DOMParser().parseFromString(html, "text/html");
+		expect(parsed.getElementById("cursor-layer")).toBeNull();
+		document.body.innerHTML = parsed.body.innerHTML;
+		const timeline = new Function(
+			"gsap",
+			`${parsed.querySelectorAll("script")[1].textContent}; return window.__timelines.openscreen;`,
+		)(gsap) as gsap.core.Timeline;
+		try {
+			for (const [time, visible] of [
+				[0.8, 1],
+				[0.1, 0],
+				[0.75, 1],
+				[1.25, 0],
+				[0.5, 0],
+				[0.9, 1],
+				[0.2, 0],
+			] as const) {
+				timeline.seek(time, false);
+				expect(document.getElementById("cursor-demo-layer")?.style.opacity, `demo at ${time}`).toBe(
+					String(visible),
+				);
+			}
+		} finally {
+			timeline.kill();
+			document.body.innerHTML = previousBody;
+		}
+		expect(() => createHyperframesComposition(request, { ...media, cursor: undefined })).toThrow(
+			/telemetry is missing/,
+		);
+		const system = createHyperframesComposition(
+			{ ...request, cursorCaptureMode: "system" },
+			{ ...media, cursor: undefined },
+		);
+		expect(
+			new DOMParser().parseFromString(system.html, "text/html").querySelector(".cursor-layer"),
+		).toBeNull();
+	});
+
+	it("drops only floating-point boundary dust without creating a legacy tail or changing audio", () => {
+		const request = {
+			...hyperframesRequest,
+			durationSeconds: 10.930000000000001,
+			trimRegions: [],
+			cursorCaptureMode: "editable-overlay" as const,
+			showCursor: true,
+			presentationRegions: [{ ...demo, startMs: 0, endMs: 10930 }],
+		};
+		const media = {
+			screen: { ...screen, durationSeconds: request.durationSeconds },
+			webcam: { ...webcam, durationSeconds: 11 },
+			audio: [
+				{ src: "assets/voice.webm", offsetSeconds: 0, durationSeconds: request.durationSeconds },
+			],
+			cursor: {
+				samples: [{ timeMs: 0, cx: 0.2, cy: 0.3, assetId: "arrow", visible: true }],
+				assets: [
+					{
+						id: "arrow",
+						src: "assets/cursor.png",
+						width: 32,
+						height: 32,
+						hotspotX: 0,
+						hotspotY: 0,
+					},
+				],
+			},
+		};
+		const composition = createHyperframesComposition(request, media);
+		expect(composition.visualSegments).toEqual([
+			{ sourceStart: 0, timelineStart: 0, duration: 10.93, mode: "demo", requestedMode: "demo" },
+		]);
+		expect(composition.segments).toEqual([
+			{ sourceStart: 0, timelineStart: 0, duration: request.durationSeconds },
+		]);
+		const doc = new DOMParser().parseFromString(composition.html, "text/html");
+		expect(doc.getElementById("cursor-layer")).toBeNull();
+		expect(doc.getElementById("cursor-demo-layer")).not.toBeNull();
+		expect(doc.querySelector('[data-duration="0"]')).toBeNull();
+		expect(doc.querySelectorAll("audio")).toHaveLength(1);
+		const short = createHyperframesComposition(
+			{
+				...request,
+				presentationRegions: [
+					{ ...demo, startMs: 0, endMs: 0.001 },
+					{ ...face, startMs: 0.001, endMs: 10930 },
+				],
+			},
+			media,
+		);
+		expect(short.visualSegments).toHaveLength(2);
+		expect(short.visualSegments[0].duration).toBe(0.000001);
+	});
+
+	it("preserves legacy clip behavior when presentation choices are absent or empty", () => {
+		const media = { screen, webcam, audio: [] };
+		expect(createHyperframesComposition(hyperframesRequest, media)).toEqual(
+			createHyperframesComposition({ ...hyperframesRequest, presentationRegions: [] }, media),
+		);
+	});
+});
+
 describe("HyperFrames IPC payload validation", () => {
 	it("accepts a screen-only request and validates each layout/mask", () => {
 		expect(validateHyperframesExportRequest(hyperframesRequest).screenVideoPath).toBe(
@@ -427,6 +759,16 @@ describe("HyperFrames IPC payload validation", () => {
 		{ cursorSize: Infinity },
 		{ cursorClipToBounds: "true" },
 		{ durationSeconds: 0 },
+		{ presentationRegions: null },
+		{ presentationRegions: [{ id: "bad", startMs: -1, endMs: 500, mode: "face-only" }] },
+		{ presentationRegions: [{ id: "bad", startMs: 0, endMs: 2001, mode: "face-only" }] },
+		{ presentationRegions: [{ id: "bad", startMs: 0, endMs: 500, mode: "injected" }] },
+		{
+			presentationRegions: [
+				{ id: "bad", startMs: 0, endMs: 1500, mode: "demo" },
+				{ id: "overlap", startMs: 1000, endMs: 2000, mode: "face-only" },
+			],
+		},
 	])("rejects malformed values %s", (patch) => {
 		expect(() => validateHyperframesExportRequest({ ...hyperframesRequest, ...patch })).toThrow();
 	});

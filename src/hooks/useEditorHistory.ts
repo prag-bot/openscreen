@@ -20,6 +20,7 @@ import {
 	DEFAULT_WEBCAM_MIRRORED,
 	DEFAULT_WEBCAM_REACTIVE_ZOOM,
 } from "@/components/video-editor/types";
+import type { PresentationRegion } from "@/lib/presentation";
 import type { AspectRatio } from "@/utils/aspectRatioUtils";
 
 // Undoable state. Selection IDs are excluded, since undoing a selection change
@@ -34,6 +35,7 @@ export interface EditorState {
 	trimRegions: TrimRegion[];
 	speedRegions: SpeedRegion[];
 	annotationRegions: AnnotationRegion[];
+	presentationRegions: PresentationRegion[];
 	cropRegion: CropRegion;
 	wallpaper: string;
 	shadowIntensity: number;
@@ -58,6 +60,7 @@ export const INITIAL_EDITOR_STATE: EditorState = {
 	trimRegions: [],
 	speedRegions: [],
 	annotationRegions: [],
+	presentationRegions: [],
 	cropRegion: DEFAULT_CROP_REGION,
 	wallpaper: DEFAULT_EDITOR_LAYOUT_SETTINGS.wallpaper,
 	shadowIntensity: DEFAULT_EDITOR_APPEARANCE_SETTINGS.shadowIntensity,
