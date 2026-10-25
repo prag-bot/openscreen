@@ -9,8 +9,10 @@
  * cooperatively cancelled), so there is no in-worker abort handling.
  */
 
+import transformersPackage from "@xenova/transformers/package.json";
 import type { TranscribeWorkerRequest, TranscribeWorkerResponse } from "./transcribe";
 import { runTranscription, type TranscriberFn } from "./transcribeCore";
+import { correctWhisperTimestampFrameCount } from "./whisperTimestampFrames";
 
 function post(message: TranscribeWorkerResponse): void {
 	(self as unknown as Worker).postMessage(message);
@@ -69,6 +71,10 @@ async function loadTranscriber(opts: {
 			"automatic-speech-recognition",
 			"Xenova/whisper-tiny",
 		)) as unknown as TranscriberFn;
+		correctWhisperTimestampFrameCount(
+			(transcriber as unknown as { model: unknown }).model,
+			transformersPackage.version,
+		);
 		return transcriber;
 	});
 }

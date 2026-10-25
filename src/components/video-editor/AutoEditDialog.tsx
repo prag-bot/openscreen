@@ -39,7 +39,13 @@ function TranscriptReview({
 	const [limit, setLimit] = useState(200);
 	useEffect(() => setLimit(Math.min(200, segments.length)), [segments]);
 	const timingLabel =
-		granularity === "word" ? "word timing" : granularity === "phrase" ? "phrase timing" : null;
+		granularity === "word"
+			? "word timing"
+			: granularity === "mixed"
+				? "word and phrase timing"
+				: granularity === "phrase"
+					? "phrase timing"
+					: null;
 	return (
 		<details className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
 			<summary className="cursor-pointer text-sm text-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#34B27B]">

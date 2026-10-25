@@ -130,6 +130,28 @@ describe("auto edit review dialog", () => {
 		expect(screen.queryByText("Transcript")).toBeNull();
 		expect(screen.queryByLabelText("Recognized transcript")).toBeNull();
 	});
+	it("labels partially refined transcription as word and phrase timing", async () => {
+		editor.transcript = [
+			{ startSec: 0.2, endSec: 0.4, text: "um" },
+			{ startSec: 0.4, endSec: 2, text: "a coarser phrase" },
+		];
+		editor.transcriptGranularity = "mixed";
+		render(
+			<AutoEditDialog
+				open
+				onOpenChange={vi.fn()}
+				videoPath="/demo.mp4"
+				durationSeconds={10}
+				trimRegions={[]}
+				revision="source-a"
+				onApply={vi.fn()}
+			/>,
+		);
+		await screen.findByText("Codex ready");
+		expect(screen.getByText("2 timed segments · word and phrase timing")).toBeTruthy();
+		expect(screen.getByText("um")).toBeTruthy();
+		expect(screen.getByText("a coarser phrase")).toBeTruthy();
+	});
 	it("renders quoted markup as speech text rather than executable HTML", async () => {
 		const speech = '<img src=x onerror="alert(1)"> <script>alert(2)</script>';
 		editor.transcript = [{ startSec: 0, endSec: 1, text: speech }];

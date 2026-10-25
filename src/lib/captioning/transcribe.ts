@@ -7,7 +7,7 @@ export interface CaptionSegment {
 }
 
 /** How caption layout should interpret `CaptionSegment` times from `transcribeMono16kToSegments`. */
-export type CaptionTimestampGranularity = "word" | "phrase";
+export type CaptionTimestampGranularity = "word" | "phrase" | "mixed";
 
 export interface TranscribeMono16kResult {
 	segments: CaptionSegment[];

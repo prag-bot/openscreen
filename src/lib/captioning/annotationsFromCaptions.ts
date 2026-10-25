@@ -1,6 +1,6 @@
 import type { AnnotationRegion, AnnotationTextStyle } from "@/components/video-editor/types";
 
-import type { CaptionSegment } from "./transcribe";
+import type { CaptionSegment, CaptionTimestampGranularity } from "./transcribe";
 
 /** Wide lower-third bar; `position.x` is top-left as % of container, so center with (100 - width) / 2. */
 const CAPTION_WIDTH = 92;
@@ -276,8 +276,9 @@ export interface CaptionSegmentLayoutOptions {
 	/**
 	 * `word`: each `CaptionSegment` is a single token with Whisper word timestamps (default).
 	 * `phrase`: merged phrase spans; use proportional line splitting inside each span.
+	 * `mixed`: some spans remain phrases; use the conservative phrase layout.
 	 */
-	timestampGranularity?: "word" | "phrase";
+	timestampGranularity?: CaptionTimestampGranularity;
 }
 
 function computeCaptionLineIndexRanges(
@@ -554,9 +555,9 @@ export function captionSegmentsToAnnotationRegions(
 	const granularity = layout?.timestampGranularity ?? "word";
 
 	const grouped =
-		granularity === "phrase"
-			? groupPhraseCaptionSegmentsIntoLines(segments, minW, maxW)
-			: groupTimedCaptionWordsIntoLines(segments, minW, maxW);
+		granularity === "word"
+			? groupTimedCaptionWordsIntoLines(segments, minW, maxW)
+			: groupPhraseCaptionSegmentsIntoLines(segments, minW, maxW);
 
 	const dedupedOut = dedupeAdjacentCaptionRepeats(grouped);
 	const finalized = finalizeCaptionSegmentsForPlayback(dedupedOut);

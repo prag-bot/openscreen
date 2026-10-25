@@ -85,11 +85,12 @@ function segmentsFromTranscriberChunks(
 			typeof start !== "number" ||
 			!Number.isFinite(start) ||
 			start < 0 ||
-			start >= audioDurationSec ||
+			start > audioDurationSec ||
+			(start === audioDurationSec && end !== null && end !== start) ||
 			(end !== null &&
 				(typeof end !== "number" ||
 					!Number.isFinite(end) ||
-					end <= start ||
+					end < start ||
 					end > audioDurationSec + MAX_FINITE_END_OVERRUN_SEC))
 		)
 			throw new InvalidTranscriptionTimingError();
@@ -98,16 +99,41 @@ function segmentsFromTranscriberChunks(
 	for (let index = 1; index < recognized.length; index++)
 		if (recognized[index].start < recognized[index - 1].start)
 			throw new InvalidTranscriptionTimingError();
+	const resolved = recognized.map((chunk, index) => ({
+		...chunk,
+		end: Math.min(chunk.end ?? recognized[index + 1]?.start ?? audioDurationSec, audioDurationSec),
+	}));
+	const timed: Array<{ start: number; end: number; text: string }> = [];
+	for (let index = 0; index < resolved.length; index++) {
+		const chunk = resolved[index];
+		if (chunk.end < chunk.start) throw new InvalidTranscriptionTimingError();
+		if (chunk.end > chunk.start) {
+			timed.push({ ...chunk });
+			continue;
+		}
+		let groupEnd = index + 1;
+		while (groupEnd < resolved.length && resolved[groupEnd].start === resolved[groupEnd].end)
+			groupEnd += 1;
+		const points = resolved.slice(index, groupEnd);
+		const next = resolved[groupEnd];
+		const previous = timed[timed.length - 1];
+		const text = points.map((point) => point.text).join(" ");
+		// DTW may assign several tokens to one encoder frame. Keep their text in
+		// order inside an adjacent existing positive span, never invent a word cut.
+		if (next && next.end > next.start && points.every((point) => point.start === next.start))
+			next.text = `${text} ${next.text}`;
+		else if (
+			previous &&
+			points.every((point) => point.start >= previous.start && point.start <= previous.end)
+		)
+			previous.text = `${previous.text} ${text}`;
+		else throw new InvalidTranscriptionTimingError();
+		index = groupEnd - 1;
+	}
 
 	const segments: CaptionSegment[] = [];
 
-	for (let idx = 0; idx < recognized.length; idx++) {
-		const { start: a, end, text } = recognized[idx];
-		// A null end means the next recognized span, or the actual final audio
-		// sample. Finite ends can round beyond that sample at Whisper's 20ms grid.
-		const b = Math.min(end ?? recognized[idx + 1]?.start ?? audioDurationSec, audioDurationSec);
-		if (b <= a) throw new InvalidTranscriptionTimingError();
-
+	for (const { start: a, end: b, text } of timed) {
 		const startSec = a + timeOffsetSec;
 		const sliceEnd = timeOffsetSec + audioDurationSec;
 		const endSec = Math.min(Math.max(startSec + 0.08, b + timeOffsetSec), sliceEnd);
@@ -118,18 +144,9 @@ function segmentsFromTranscriberChunks(
 		segments.push({ startSec, endSec, text });
 	}
 
-	segments.sort((u, v) => u.startSec - v.startSec || u.endSec - v.endSec);
-	const rawDeduped: CaptionSegment[] = [];
-	for (const seg of segments) {
-		const prev = rawDeduped[rawDeduped.length - 1];
-		if (prev && prev.text === seg.text && seg.startSec <= prev.endSec) {
-			prev.endSec = Math.max(prev.endSec, seg.endSec);
-			prev.startSec = Math.min(prev.startSec, seg.startSec);
-			continue;
-		}
-		rawDeduped.push(seg);
-	}
-	return rawDeduped;
+	// Starts were checked in recognition order. Equal-start spans and repeated
+	// fillers must keep that order and text; downstream overlap unions retain it.
+	return segments;
 }
 
 /** Runs the transcriber on one audio slice, chunking only long clips. */
@@ -182,6 +199,79 @@ function extractChunksFromAsrResult(result: unknown): Array<{
 		return [{ timestamp: [0, null], text }];
 	}
 	return [];
+}
+
+function recognizedWords(text: string): string {
+	return (
+		text
+			.normalize("NFKC")
+			.toLowerCase()
+			.replace(/['’]/g, "")
+			.match(/[\p{L}\p{M}\p{N}]+/gu) ?? []
+	).join(" ");
+}
+
+/** Refine only independently bounded phrases; uncertain wording/timing keeps its coarse span. */
+async function refinePhraseTiming(
+	transcriber: TranscriberFn,
+	samples: Float32Array,
+	phrases: CaptionSegment[],
+): Promise<TranscribeMono16kResult> {
+	const segments: CaptionSegment[] = [];
+	let attempted = 0;
+	let refined = 0;
+	for (const phrase of phrases) {
+		const first = Math.ceil(phrase.startSec * 16_000);
+		const last = Math.min(samples.length, Math.floor(phrase.endSec * 16_000));
+		let words: CaptionSegment[] | undefined;
+		if (
+			phrase.endSec - phrase.startSec <= 30 &&
+			last - first >= MIN_TRANSCRIBE_SLICE_SAMPLES &&
+			attempted < 200
+		) {
+			attempted += 1;
+			for (const forceFullSequences of [false]) {
+				try {
+					const result = await runTranscriberOnSlice(transcriber, samples.subarray(first, last), {
+						forceFullSequences,
+						timestampMode: "word",
+					});
+					const chunks = getChunksFromTranscriberResult(result);
+					if (!chunks.length) break; // Text alone cannot justify finer boundaries.
+					const local = segmentsFromTranscriberChunks(
+						chunks,
+						first / 16_000,
+						[],
+						(last - first) / 16_000,
+					);
+					if (
+						!local.length ||
+						recognizedWords(local.map((segment) => segment.text).join(" ")) !==
+							recognizedWords(phrase.text)
+					)
+						break;
+					if (
+						local.some(
+							(segment) => segment.startSec < phrase.startSec || segment.endSec > phrase.endSec,
+						)
+					)
+						break;
+					words = local;
+					break;
+				} catch {
+					// This phrase retains complete recognized text and its real coarse bounds.
+				}
+			}
+		}
+		if (words) {
+			segments.push(...words);
+			refined += 1;
+		} else segments.push({ ...phrase });
+	}
+	return {
+		segments,
+		granularity: refined === 0 ? "phrase" : refined === phrases.length ? "word" : "mixed",
+	};
 }
 
 /**
@@ -284,7 +374,9 @@ export async function runTranscription(
 			}
 		}
 		if (segments.length > 0) {
-			return { segments, granularity: resultGranularity };
+			return resultGranularity === "phrase"
+				? refinePhraseTiming(transcriber, samples, segments)
+				: { segments, granularity: resultGranularity };
 		}
 	}
 

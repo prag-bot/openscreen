@@ -167,6 +167,23 @@ describe("auto edit lifecycle", () => {
 		expect(result.current.error).toBe("Codex unavailable");
 		expect(result.current.plan).toBeNull();
 	});
+	it("preserves mixed timing when only part of the local transcript has precise word alignment", async () => {
+		audio.transcribe.mockResolvedValue({
+			segments: [
+				{ startSec: 1, endSec: 1.2, text: "um" },
+				{ startSec: 1.2, endSec: 3, text: "a coarser phrase" },
+			],
+			granularity: "mixed",
+		});
+		const { result } = renderHook(() => useAutoEdit("/source.mp4", 1800, "source-a"));
+		await act(async () => result.current.generate("Clean up", false));
+		expect(result.current.transcriptGranularity).toBe("mixed");
+		expect(result.current.transcript).toEqual([
+			{ startSec: 61, endSec: 61.2, text: "um" },
+			{ startSec: 61.2, endSec: 63, text: "a coarser phrase" },
+		]);
+		expect(propose).toHaveBeenCalledOnce();
+	});
 	it("clears inspected speech on regeneration and cancellation, ignoring late transcription", async () => {
 		propose.mockResolvedValue({ success: false, error: "Codex unavailable" });
 		const { result } = renderHook(() => useAutoEdit("/source.mp4", 1800, "source-a"));

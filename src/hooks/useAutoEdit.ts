@@ -116,7 +116,11 @@ export function useAutoEdit(videoPath: string | null, durationSeconds: number, r
 					"No speech was transcribed. Nothing was sent to Codex and no edits were made.",
 				);
 			setTranscript(segments.map((segment) => ({ ...segment })));
-			setTranscriptGranularity(transcription.granularity === "word" ? "word" : "phrase");
+			setTranscriptGranularity(
+				transcription.granularity === "word" || transcription.granularity === "mixed"
+					? transcription.granularity
+					: "phrase",
+			);
 			setTranscriptRevision(sourceRevision);
 			setPhase("Codex is proposing cuts. Your original recording stays untouched…");
 			const result = await window.electronAPI.planAutoEdit({

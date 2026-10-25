@@ -46,6 +46,32 @@ describe("groupPhraseCaptionSegmentsIntoLines", () => {
 });
 
 describe("captionSegmentsToAnnotationRegions", () => {
+	it("uses phrase layout for mixed timing instead of treating a coarse phrase as one timed word", () => {
+		const segments = [
+			{ startSec: 0.1, endSec: 0.3, text: "um" },
+			{ startSec: 1, endSec: 3, text: "alpha beta gamma delta" },
+		];
+		const layout = { minWordsPerCaption: 2, maxWordsPerCaption: 2 };
+		const mixed = captionSegmentsToAnnotationRegions(segments, 1, 1, {
+			...layout,
+			timestampGranularity: "mixed",
+		});
+		const phrase = captionSegmentsToAnnotationRegions(segments, 1, 1, {
+			...layout,
+			timestampGranularity: "phrase",
+		});
+		const word = captionSegmentsToAnnotationRegions(segments, 1, 1, {
+			...layout,
+			timestampGranularity: "word",
+		});
+		expect(mixed).toEqual(phrase);
+		expect(mixed).not.toEqual(word);
+		expect(mixed.regions.map((region) => region.content)).toEqual([
+			"um",
+			"alpha beta",
+			"gamma delta",
+		]);
+	});
 	it("uses raw phrase timing instead of shifting caption boundaries", () => {
 		const { regions } = captionSegmentsToAnnotationRegions(
 			[
