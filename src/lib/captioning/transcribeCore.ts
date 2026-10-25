@@ -35,6 +35,17 @@ const TRANSCRIBE_SLICE_SAMPLES = 12 * 60 * 16_000;
 
 /** Very short slices are skipped in the multi-slice loop unless padded (see `padTailSliceForTranscribe`). */
 const MIN_TRANSCRIBE_SLICE_SAMPLES = 800;
+/** Permit bounded decoder-grid tail rounding, never a grossly out-of-range model span. */
+const MAX_FINITE_END_OVERRUN_SEC = 0.1;
+
+class InvalidTranscriptionTimingError extends Error {
+	constructor() {
+		super(
+			"Speech was recognized, but the local model returned invalid timestamps. No edit was made. Retry transcription.",
+		);
+		this.name = "InvalidTranscriptionTimingError";
+	}
+}
 
 /**
  * Pad a short tail slice so Whisper still runs; timestamps are clamped with `realDurationSec` so
@@ -53,51 +64,49 @@ function padTailSliceForTranscribe(samples: Float32Array): {
 	return { slice: padded, realDurationSec };
 }
 
-/** Converts raw Whisper chunk output into sorted, deduped, trim-filtered caption segments. */
+/** Reject a malformed pass as a whole so retries can recover every recognized word. */
 function segmentsFromTranscriberChunks(
 	chunks: Array<{ timestamp?: [number | null, number | null]; text?: unknown }>,
 	timeOffsetSec: number,
 	trims: TrimRegion[],
 	audioDurationSec: number,
 ): CaptionSegment[] {
-	const sorted = [...chunks].sort((x, y) => {
-		const ax = x.timestamp?.[0];
-		const ay = y.timestamp?.[0];
-		const na = typeof ax === "number" ? ax : -1;
-		const nb = typeof ay === "number" ? ay : -1;
-		return na - nb;
+	const recognized = chunks.flatMap((chunk) => {
+		const text = String(chunk?.text ?? "")
+			.replace(/\s+/g, " ")
+			.trim();
+		if (!text) return [];
+		const timestamp = chunk.timestamp;
+		if (!Array.isArray(timestamp) || timestamp.length !== 2)
+			throw new InvalidTranscriptionTimingError();
+		const start = timestamp[0] === null ? 0 : timestamp[0];
+		const end = timestamp[1];
+		if (
+			typeof start !== "number" ||
+			!Number.isFinite(start) ||
+			start < 0 ||
+			start >= audioDurationSec ||
+			(end !== null &&
+				(typeof end !== "number" ||
+					!Number.isFinite(end) ||
+					end <= start ||
+					end > audioDurationSec + MAX_FINITE_END_OVERRUN_SEC))
+		)
+			throw new InvalidTranscriptionTimingError();
+		return [{ start, end, text }];
 	});
+	for (let index = 1; index < recognized.length; index++)
+		if (recognized[index].start < recognized[index - 1].start)
+			throw new InvalidTranscriptionTimingError();
 
 	const segments: CaptionSegment[] = [];
 
-	for (let idx = 0; idx < sorted.length; idx++) {
-		const c = sorted[idx]!;
-		const ts = c.timestamp as [number | null, number | null] | undefined;
-		if (!ts) continue;
-		let a = ts[0];
-		let b = ts[1];
-		if (a == null) a = 0;
-		a = Math.max(0, a);
-		if (b == null) {
-			let nextStart: number | null = null;
-			for (let j = idx + 1; j < sorted.length; j++) {
-				const na = sorted[j]?.timestamp?.[0];
-				if (typeof na === "number") {
-					nextStart = na;
-					break;
-				}
-			}
-			b = nextStart ?? audioDurationSec;
-		}
-		if (b <= a) {
-			b = Math.min(a + 0.25, audioDurationSec);
-		}
-		b = Math.min(b, audioDurationSec);
-
-		const text = String(c.text ?? "")
-			.replace(/\s+/g, " ")
-			.trim();
-		if (!text) continue;
+	for (let idx = 0; idx < recognized.length; idx++) {
+		const { start: a, end, text } = recognized[idx];
+		// A null end means the next recognized span, or the actual final audio
+		// sample. Finite ends can round beyond that sample at Whisper's 20ms grid.
+		const b = Math.min(end ?? recognized[idx + 1]?.start ?? audioDurationSec, audioDurationSec);
+		if (b <= a) throw new InvalidTranscriptionTimingError();
 
 		const startSec = a + timeOffsetSec;
 		const sliceEnd = timeOffsetSec + audioDurationSec;
@@ -186,6 +195,10 @@ export async function runTranscription(
 	samples: Float32Array,
 	trims: TrimRegion[],
 ): Promise<TranscribeMono16kResult> {
+	let invalidTiming: InvalidTranscriptionTimingError | undefined;
+	let invalidWordTiming = false;
+	let sawValidTimedSpeech = false;
+	let resultGranularity: "word" | "phrase" = "phrase";
 	const transcribeOne = async (
 		ignoreTrims: boolean,
 		forceFullSequences: boolean,
@@ -193,18 +206,29 @@ export async function runTranscription(
 	): Promise<CaptionSegment[]> => {
 		try {
 			const activeTrims = ignoreTrims ? [] : trims;
+			let passHasSpeech = false;
+			let passHasCoarseTiming = false;
+			const mapResult = (result: unknown, offset: number, duration: number) => {
+				const chunks = extractChunksFromAsrResult(result);
+				const mapped = segmentsFromTranscriberChunks(chunks, offset, activeTrims, duration);
+				if (chunks.some((chunk) => String(chunk?.text ?? "").trim())) {
+					passHasSpeech = true;
+					passHasCoarseTiming ||= getChunksFromTranscriberResult(result).length === 0;
+				}
+				return mapped;
+			};
+			const completePass = (segments: CaptionSegment[]) => {
+				sawValidTimedSpeech ||= passHasSpeech;
+				resultGranularity = passHasCoarseTiming ? "phrase" : timestampMode;
+				return segments;
+			};
 			if (samples.length <= TRANSCRIBE_SLICE_SAMPLES) {
 				const { slice, realDurationSec } = padTailSliceForTranscribe(samples);
 				const result = await runTranscriberOnSlice(transcriber, slice, {
 					forceFullSequences,
 					timestampMode,
 				});
-				return segmentsFromTranscriberChunks(
-					extractChunksFromAsrResult(result),
-					0,
-					activeTrims,
-					realDurationSec,
-				);
+				return completePass(mapResult(result, 0, realDurationSec));
 			}
 
 			const all: CaptionSegment[] = [];
@@ -225,18 +249,14 @@ export async function runTranscription(
 					timestampMode,
 				});
 				const tOff = offset / 16_000;
-				all.push(
-					...segmentsFromTranscriberChunks(
-						extractChunksFromAsrResult(result),
-						tOff,
-						activeTrims,
-						realDurationSec,
-					),
-				);
+				all.push(...mapResult(result, tOff, realDurationSec));
 			}
-			return all;
+			return completePass(all);
 		} catch (e) {
-			console.warn("[captioning] Whisper pass failed:", e);
+			if (e instanceof InvalidTranscriptionTimingError) {
+				invalidTiming = e;
+				if (timestampMode === "word") invalidWordTiming = true;
+			} else console.warn("[captioning] Whisper pass failed:", e);
 			return [];
 		}
 	};
@@ -244,10 +264,14 @@ export async function runTranscription(
 	const attemptModes: Array<"word" | "phrase"> = ["word", "phrase"];
 	for (const timestampMode of attemptModes) {
 		let segments = await transcribeOne(false, true, timestampMode);
-		if (segments.length === 0) {
+		if (segments.length === 0 && !(timestampMode === "word" && invalidWordTiming)) {
 			segments = await transcribeOne(false, false, timestampMode);
 		}
-		if (segments.length === 0 && trims.length > 0) {
+		if (
+			segments.length === 0 &&
+			trims.length > 0 &&
+			!(timestampMode === "word" && invalidWordTiming)
+		) {
 			segments = dropSegmentsOverlappingTrimRegions(
 				await transcribeOne(true, true, timestampMode),
 				trims,
@@ -260,9 +284,10 @@ export async function runTranscription(
 			}
 		}
 		if (segments.length > 0) {
-			return { segments, granularity: timestampMode };
+			return { segments, granularity: resultGranularity };
 		}
 	}
 
+	if (invalidTiming && !sawValidTimedSpeech) throw invalidTiming;
 	return { segments: [], granularity: "phrase" };
 }

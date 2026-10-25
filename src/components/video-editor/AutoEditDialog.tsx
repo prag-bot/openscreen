@@ -12,12 +12,82 @@ import {
 import { useAutoEdit } from "@/hooks/useAutoEdit";
 import { buildAutoEditTrims } from "@/lib/applyAutoEdit";
 import type { AutoEditPlan, AutoEditStatus } from "@/lib/autoEdit";
+import type { CaptionSegment, CaptionTimestampGranularity } from "@/lib/captioning/transcribe";
 import { buildKeptClipSegments } from "@/lib/exporter/hyperframesExporter";
 import type { TrimRegion } from "./types";
 
 export function formatEditTime(seconds: number): string {
 	const whole = Math.max(0, Math.round(seconds));
 	return Math.floor(whole / 60) + ":" + String(whole % 60).padStart(2, "0");
+}
+
+function transcriptTime(seconds: number): string {
+	const totalMs = Math.max(0, Math.round(seconds * 1000));
+	const whole = Math.floor(totalMs / 1000);
+	return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}.${String(
+		totalMs % 1000,
+	).padStart(3, "0")}`;
+}
+
+function TranscriptReview({
+	segments,
+	granularity,
+}: {
+	segments: CaptionSegment[];
+	granularity: CaptionTimestampGranularity | null;
+}) {
+	const [limit, setLimit] = useState(200);
+	useEffect(() => setLimit(Math.min(200, segments.length)), [segments]);
+	const timingLabel =
+		granularity === "word" ? "word timing" : granularity === "phrase" ? "phrase timing" : null;
+	return (
+		<details className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
+			<summary className="cursor-pointer text-sm text-slate-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#34B27B]">
+				<span className="font-medium">Transcript</span>
+				<span className="ml-2 text-xs text-slate-400">
+					{segments.length} timed {segments.length === 1 ? "segment" : "segments"}
+					{timingLabel ? ` · ${timingLabel}` : ""}
+				</span>
+			</summary>
+			<p className="mt-3 text-xs leading-relaxed text-slate-400">
+				These words were recognized on this Mac. Times refer to the original recording.
+			</p>
+			{segments.length > 0 ? (
+				<>
+					<ol
+						aria-label="Recognized transcript"
+						className="mt-3 max-h-52 space-y-2 overflow-y-auto border-t border-white/10 pt-3 text-xs"
+					>
+						{segments.slice(0, limit).map((segment, index) => (
+							<li key={index} className="grid gap-1 sm:grid-cols-[9rem_1fr] sm:gap-3">
+								<span className="font-mono tabular-nums text-slate-400">
+									{transcriptTime(segment.startSec)}–{transcriptTime(segment.endSec)}
+								</span>
+								<span className="whitespace-pre-wrap break-words leading-relaxed text-slate-200">
+									{segment.text}
+								</span>
+							</li>
+						))}
+					</ol>
+					{limit < segments.length && (
+						<div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+							<span>
+								Showing {limit} of {segments.length} timed segments
+							</span>
+							<Button
+								variant="outline"
+								onClick={() => setLimit((current) => Math.min(current + 200, segments.length))}
+							>
+								Show more transcript
+							</Button>
+						</div>
+					)}
+				</>
+			) : (
+				<p className="mt-3 text-xs text-slate-400">No words were recognized.</p>
+			)}
+		</details>
+	);
 }
 
 interface Props {
@@ -183,6 +253,12 @@ export function AutoEditDialog({
 						>
 							{editor.error || applyError || preview?.error}
 						</p>
+					)}
+					{editor.transcript != null && (
+						<TranscriptReview
+							segments={editor.transcript}
+							granularity={editor.transcriptGranularity}
+						/>
 					)}
 					{editor.plan && (
 						<div className="space-y-3 rounded-lg border border-[#34B27B]/30 bg-[#34B27B]/5 p-3">

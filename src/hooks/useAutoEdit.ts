@@ -6,12 +6,17 @@ import {
 	transcribeMono16kToSegments,
 	trimLeadingSilenceMono16k,
 } from "@/lib/captioning";
+import type { CaptionSegment, CaptionTimestampGranularity } from "@/lib/captioning/transcribe";
 
 export function useAutoEdit(videoPath: string | null, durationSeconds: number, revision: string) {
 	const [phase, setPhase] = useState<string | null>(null);
 	const [error, setError] = useState<string | null>(null);
 	const [plan, setPlan] = useState<AutoEditPlan | null>(null);
 	const [planRevision, setPlanRevision] = useState<string | null>(null);
+	const [transcript, setTranscript] = useState<CaptionSegment[] | null>(null);
+	const [transcriptGranularity, setTranscriptGranularity] =
+		useState<CaptionTimestampGranularity | null>(null);
+	const [transcriptRevision, setTranscriptRevision] = useState<string | null>(null);
 	const active = useRef<{ id: string; controller: AbortController } | null>(null);
 	const revisionRef = useRef(revision);
 	const lastRevisionRef = useRef(revision);
@@ -22,6 +27,9 @@ export function useAutoEdit(videoPath: string | null, durationSeconds: number, r
 		job?.controller.abort();
 		if (job) void window.electronAPI.cancelAutoEdit(job.id).catch(() => undefined);
 		setPhase(null);
+		setTranscript(null);
+		setTranscriptGranularity(null);
+		setTranscriptRevision(null);
 	}, []);
 	useEffect(() => {
 		if (lastRevisionRef.current === revision) return;
@@ -47,12 +55,19 @@ export function useAutoEdit(videoPath: string | null, durationSeconds: number, r
 		active.current = job;
 		setPlan(null);
 		setError(null);
+		setTranscript(null);
+		setTranscriptGranularity(null);
+		setTranscriptRevision(null);
 		setPhase("Extracting narration locally…");
 		const isCurrent = () =>
 			active.current === job &&
 			revisionRef.current === sourceRevision &&
 			!job.controller.signal.aborted;
 		try {
+			if (!Number.isFinite(durationSeconds) || durationSeconds <= 0 || durationSeconds > 14_400)
+				throw new Error(
+					"The recording duration is invalid. Reload the recording before using Auto edit.",
+				);
 			const audio = await window.electronAPI.prepareAutoEditAudio({ jobId: job.id, videoPath });
 			if (!isCurrent()) return;
 			if (!audio.success || !audio.path)
@@ -65,11 +80,17 @@ export function useAutoEdit(videoPath: string | null, durationSeconds: number, r
 				throw new Error(
 					"This recording exceeds the transcription limit. Split it first; no partial edit was made.",
 				);
-			if (samples.length < 800 || !samples.some((sample) => Math.abs(sample) > 0.012))
+			// AAC can extend past the final video frame. Transcribe only the source video
+			// intersection; ceil retains the final partial sample inside that recording.
+			const recordingSamples = samples.subarray(0, Math.ceil(durationSeconds * 16_000));
+			if (
+				recordingSamples.length < 800 ||
+				!recordingSamples.some((sample) => Math.abs(sample) > 0.012)
+			)
 				throw new Error(
 					"No audible narration found. Enable the microphone when recording, or import a video with speech.",
 				);
-			const { samples: speechSamples, trimSec } = trimLeadingSilenceMono16k(samples);
+			const { samples: speechSamples, trimSec } = trimLeadingSilenceMono16k(recordingSamples);
 			const transcription = await transcribeMono16kToSegments(speechSamples, {
 				signal: job.controller.signal,
 				onStatus: (value) => {
@@ -82,15 +103,21 @@ export function useAutoEdit(videoPath: string | null, durationSeconds: number, r
 				},
 			});
 			if (!isCurrent()) return;
-			const segments = normalizeLocalAutoEditTranscript(transcription.segments).map((segment) => ({
-				...segment,
-				startSec: segment.startSec + trimSec,
-				endSec: segment.endSec + trimSec,
-			}));
+			const segments = normalizeLocalAutoEditTranscript(
+				transcription.segments.map((segment) => ({
+					...segment,
+					startSec: segment.startSec + trimSec,
+					endSec: segment.endSec + trimSec,
+				})),
+				{ durationSeconds },
+			);
 			if (!segments.length)
 				throw new Error(
 					"No speech was transcribed. Nothing was sent to Codex and no edits were made.",
 				);
+			setTranscript(segments.map((segment) => ({ ...segment })));
+			setTranscriptGranularity(transcription.granularity === "word" ? "word" : "phrase");
+			setTranscriptRevision(sourceRevision);
 			setPhase("Codex is proposing cuts. Your original recording stays untouched…");
 			const result = await window.electronAPI.planAutoEdit({
 				jobId: job.id,
@@ -120,6 +147,8 @@ export function useAutoEdit(videoPath: string | null, durationSeconds: number, r
 		phase,
 		error,
 		plan: planRevision === revision ? plan : null,
+		transcript: transcriptRevision === revision ? transcript : null,
+		transcriptGranularity: transcriptRevision === revision ? transcriptGranularity : null,
 		generate,
 		cancel,
 		clearPlan: () => setPlan(null),
